@@ -14,7 +14,7 @@ U8G2_SSD1306_128X32_UNIVISION_1_HW_I2C display(U8G2_R0, SCL, SDA, U8X8_PIN_NONE)
 #define PASSWORD ""
 #define HOSTNAME ""
 #define WEBSERVERPORT "80"
-
+//change baud rate AT+UART_DEF=115200,8,1,0,0
 
 // Used for programming
 int i;
@@ -25,6 +25,7 @@ String t;
 const byte numChars = 32;
 char receivedChars[numChars];   // an array to store the received data
 boolean newData = false;
+int arrInfo[6];
 // pumps
 // pump is [i][0], while any associated sensor is the next [0][i]
 int sys[5][5] = {
@@ -162,37 +163,68 @@ int parser(char arr[], int i) {
   return arr2[i];
 }
 
-
 void reply8266() {
-  String webpage = F("<h1>Automatic watering system</h1><h2>");
-  webpage += i;
-  webpage += F("<form action=""/"">");
-  webpage += F("Pin:<br>");
-  webpage += F("<input type=""text"" name=""pin"" value=""><br>");
-  webpage += F("Last selection: ");
-  webpage += webparsedresponse[1];
-  webpage += F("<input type=""submit"" value=""Submit"">");
-  webpage += F("</form>");
-  webpage += F("</h2>");
-  String cipSend = "AT+CIPSEND=";
-  cipSend += webparsedresponse[0];
-  cipSend += ",";
-  cipSend += webpage.length();
-  sendData(cipSend, 1000);
-  sendData(webpage, 1000);
-  delay(100);
-  String closeCommand = "AT+CIPCLOSE=";
-  closeCommand += webparsedresponse[0]; // append connection id
-  sendData(closeCommand, 1000);
-  //reset webparsedresponse
-  webparsedresponse[3];
+  // parse reply from esp8266 and return a response based on reply
+  if (webparsedresponse[1] > 0 && webparsedresponse[2] == 1 ) {
+    // selected pump must be turned on
+    pumpwater(webparsedresponse[0]);
+    String webpage = F("<h1>Automatic watering system</h1><h2>");
+    webpage += F("Pump : ");
+    webpage += webparsedresponse[0];
+    webpage += F("is enabled.");
+    webpage += F("<button onclick=""goBack()"">Go Back</button>");
+    webpage += F("<script>");
+    webpage += F("function goBack() {");
+    webpage += F("window.history.back();");
+    webpage += F("}");
+    webpage += F("</script>");
+    webpage += F("</h2>");
+  }
+  else if (webparsedresponse[1] > 0 && webparsedresponse[2] == 0 ) {
+    // return info on sensors for selected pump
+      info(webparsedresponse[1]);
+  }
+  else if (webparsedresponse[1] == 0 ) {
+    // return front page
+    String webpage = F("<h1>Automatic watering system</h1><h2>");
+    webpage += i;
+    webpage += F("<form action=""/"">");
+    webpage += F("Pin:<br>");
+    webpage += F("<input type=""text"" name=""pin"" value=""><br>");
+    webpage += F("Last selection: ");
+    webpage += webparsedresponse[1];
+    webpage += F("<input type=""submit"" value=""Submit"">");
+    webpage += F("</form>");
+    webpage += F("</h2>");
+    String cipSend = "AT+CIPSEND=";
+    cipSend += webparsedresponse[0];
+    cipSend += ",";
+    cipSend += webpage.length();
+    sendData(cipSend, 1000);
+    sendData(webpage, 1000);
+    delay(100);
+    String closeCommand = "AT+CIPCLOSE=";
+    closeCommand += webparsedresponse[0]; // append connection id
+    sendData(closeCommand, 1000);
+    //reset webparsedresponse
+    webparsedresponse[3];
+  }
+}
+void info(int i) {
+  // get info from all enabled sensors for pump i
+  arrInfo[1] = i;
+  for (j = 0 ; i < 5 ; ++i ) {
+    if (sys[i][j] >= 0 ) {
+      arrInfo[j + 1] = analogRead('a' + sys[i][j]);
+    }
+  }
 }
 
 void read8266() {
+  // read reply from esp8266 using serial communication
   static byte ndx = 0;
   char endMarker = '\n';
   char rc;
-
   while (Serial.available() > 0 && newData == false) {
     rc = Serial.read();
     if (rc != endMarker) {
@@ -209,10 +241,7 @@ void read8266() {
     }
   }
   // empty buffer
-  while (Serial.available()) {
-    // empty serial buffer
-    Serial.read();
-  }
+  emptyserialbuffer();
 }
 
 void reset8266 () {
@@ -232,14 +261,14 @@ void writetodisplay(String t) {
 }
 
 void InitWifiModule() {
-  //change baud rate AT+UART_DEF=115200,8,1,0,0
+  // initialise esp8266
   sendData("AT+RST", 2000); // reset
   delay(1000);
   sendData("AT+CWMODE=1", 1000);
   delay(1000);
   sendData("AT+CWHOSTNAME=\""HOSTNAME"\"", 1000); // fisken\"\r\n", 1000);
   delay(1000);
-  sendData("AT+CWJAP_CUR=\""SSID"\",\""PASSWORD"\"", 2000)
+  sendData("AT+CWJAP_CUR=\""SSID"\",\""PASSWORD"\"", 2000);
   delay(5000);
   // sendData("AT+CIFSR", 1000); // Show IP Adress
   sendData("AT+CIPMUX=1", 1000); // Multiple conexions
@@ -247,6 +276,13 @@ void InitWifiModule() {
   sendData("AT+CIPSERVER=1,"WEBSERVERPORT"", 1000); // start comm port 80
 }
 
+void emptyserialbuffer() {
+  // empty serial buffer
+  while (Serial.available())
+  {
+    Serial.read();
+  }
+}
 /*************************************************/
 // Send AT commands to esp8266
 void sendData(String command, const int timeout) {
@@ -256,10 +292,6 @@ void sendData(String command, const int timeout) {
   long int time = millis();
   while ( (time + timeout) > millis())
   {
-    while (Serial.available())
-    {
-      // empty serial buffer
-      char t = Serial.read();
-    }
+    emptyserialbuffer();
   }
 }
