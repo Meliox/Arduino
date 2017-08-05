@@ -14,7 +14,7 @@ U8G2_SSD1306_128X32_UNIVISION_1_HW_I2C display(U8G2_R0, SCL, SDA, U8X8_PIN_NONE)
 //change baud rate AT+UART_DEF=115200,8,1,0,0
 
 // enable and disbale pumps and connected sensors
-// pump is [i][0], while any associated sensor is the next [0][i]
+// pump is [i][0], while any associated sensor is the next [0][i], e.g. 4 sensors possible per pump
 int sys[5][5] = {
   {2, 0, -1, -1, -1} ,
   {3, -1, -1, -1, -1} ,
@@ -24,8 +24,8 @@ int sys[5][5] = {
 };
 // limit
 #define PUMPTIME "2000"
-short int limit = 400;
-short int checkinterval = 900000; // how often to check the sensors for each pump
+#define SENSORLIMIT "200"
+#define CHECKINTERVAL "900000" // how often to check the sensors for each pump
 
 // CODE BELOW
 ///////////////////////////////////////////////////////////////////////////////////////
@@ -35,12 +35,17 @@ int j;
 int webparsedresponse[3];
 const byte numChars = 32;
 char receivedChars[numChars];   // an array to store the received data
+char serialmessage[32];
 boolean newData = false;
 int arrInfo[5];
 long int lastupdate[5] = { -1, -1, -1, -1, -1};
 long int lastdisplayupdate;
 String webpage;
+String displaytext;
+boolean lcdon = true;
+short int lcdloop = 0;
 
+////////////////////////////////////////////////////////////////////////////////////////
 void setup(void) {
   // initialise all connected parts
   // turn off all pumpts
@@ -58,24 +63,60 @@ void setup(void) {
 
 /* draw something on the display with the `firstPage()`/`nextPage()` loop*/
 void loop(void) {
-  // check webserver and respond
-  check8266();
-  // update display information
-  writetodisplay(String(k));
-  checksensors();
-  k++;
+  check8266(); // check webserver and respond
+ // updatedisplay(); // update display information
+  checksensors(); // check sensors and pump water is deemed necessary
+}
+
+void updatedisplay() {
+  // limit updating of the display
+  if (lcdon) {
+    if (millis() >= lastdisplayupdate + 60000) {
+      // only display information for enabled pumps
+      while (sys[lcdloop][0] < 0) {
+        ++lcdloop;
+        // reset loop
+        if (lcdloop = 4 ) {
+          lcdloop = 0;
+        }
+      }
+      // Assembly display message
+      displaytext = F("P: ");
+      displaytext += lcdloop;
+      displaytext = F(" ");
+      getsenorinfo(lcdloop);
+      for (i = 0 ; i < 4 ; ++i ) {
+        if (arrInfo[i] >= 0) {
+          displaytext += F("S: ");
+          displaytext += lcdloop;
+          displaytext += F(": ");
+          displaytext += arrInfo[i];
+          displaytext += F(",");
+        }
+        // Print to display
+        writetodisplay(displaytext);
+        ++lcdloop;
+      }
+      // reset loop
+      if (lcdloop >= 4 ) {
+        lcdloop = 0;
+      }
+      // clear display text and pause display update
+      displaytext;
+      lastdisplayupdate = millis();
+    }
+  } else {
+    display.clear();
+  }
 }
 
 void pumpoff() {
-  // PUMP SECTION, turn off all pumps
-  for (i = 0 ; i < 5 ; ++i )
-  {
-    if (sys[i][0] >= 0)
-    {
+  // turn off all pumps
+  for (i = 0 ; i < 5 ; ++i ) {
+    if (sys[i][0] >= 0) {
       pinMode(sys[i][0], OUTPUT);
       digitalWrite(sys[i][0], LOW);
     }
-
   }
 }
 
@@ -95,15 +136,15 @@ void checksensors() {
   // loop through all anabled pumps and sensors
   for (i = 0 ; i < 5 ; ++i ) {
     // only enabled pumps
-    if (sys[i][0] >= 0 && millis() > lastupdate[i] + checkinterval )
+    if (sys[i][0] >= 0 && millis() > lastupdate[i] + CHECKINTERVAL )
     {
       // loop through all sensors
-      for (j = 0 ; i < 5 ; ++i ) {
+      for (j = 1 ; i < 4 ; ++i ) {
         //only enabled sensors
         if (sys[i][j] >= 0)
         {
           // if sensor is above limit, we need to pump water
-          if (analogRead('a' + sys[i][j]) > limit ) {
+          if (analogRead(sys[i][j]) > SENSORLIMIT ) {
             // pump water
             pumpwater(sys[i]);
             // exit loop so water can settle for pump and sensors, go to next pump
@@ -125,28 +166,38 @@ void pumpwater(int i) {
 }
 
 void parseresponse8266() {
-  // char lol[] = "0,424:GET /?pin=2&on=65 HTTP/1.";
+  // possible reponses from esp8266
+  // receivedChars="0,424:GET /?pin=2&on=65 HTTP/1.";
   // receivedChars="0,424:GET /?pin=sd HTTP/1.1";
   // receivedChars="0,424:GET HTTP/1.1 xxxxxxxxxxxxxxxx";
+  strcpy(serialmessage, receivedChars);
   // get connection id
-  webparsedresponse[0] = parser(receivedChars, 0);
+  webparsedresponse[0] = parser(serialmessage, 0);
   // parse pin if present
-  if (strcmp(receivedChars, "pin") == 0) { // todo: broken
-    webparsedresponse[1] = parser(receivedChars, 3);
-    // parse enable if present
-    if (strcmp(receivedChars, "on") == 0) { // todo: broken
-      webparsedresponse[2] = parser(receivedChars, 5);
-    } else {
-      webparsedresponse[2] = -1;
-    }
-
+  strcpy(serialmessage, receivedChars);
+  if (strstr(serialmessage, "pin")) { // todo: broken
+    webparsedresponse[1] = parser(serialmessage, 3);
   } else {
     webparsedresponse[1] = -1;
   }
-  //reset data
-  for (i = 0 ; i < 3 ; ++i ) {
-    Serial.println(webparsedresponse[i]);
+  strcpy(serialmessage, receivedChars);
+  // parse enable if present
+  if (strstr(serialmessage, "on")) {
+    webparsedresponse[2] = 1;
+  } else {
+    webparsedresponse[2] = -1;
   }
+  // parse lcd if present
+  strcpy(serialmessage, receivedChars);
+  if (strstr(serialmessage, "lcd")) {
+    if (lcdon) {
+      lcdon = false;
+    } else {
+      lcdon = true;
+    }
+  }
+  //reset data
+  serialmessage[32];
   newData = false;
 }
 
@@ -168,39 +219,50 @@ int parser(char arr[], int i) {
 
 void reply8266() {
   // parse reply from esp8266 and return a response based on reply
+  webpage = F("<h1>Auto water sys</h1><h2>");
   if (webparsedresponse[1] >= 0 && webparsedresponse[2] == 1 ) {
     // selected pump must be turned on
-    pumpwater(webparsedresponse[0]);
-    webpage = F("<h1>Automatic watering system</h1><h2>");
-    webpage += F("Pump : ");
-    webpage += webparsedresponse[0];
-    webpage += F("is enabled.");
+    pumpwater(webparsedresponse[1]);
+    webpage += F("Pump ");
+    webpage += webparsedresponse[1];
+    webpage += F(" is turned on.");
     webpage += F("</h2>");
   }
   else if (webparsedresponse[1] >= 0 ) {
     // return info on sensors for selected pump
-    webpage = F("<h2>Pump: ");
-    webpage += webparsedresponse[0];
-    info(webparsedresponse[1]);
-    for (i = 0 ; i < 5 ; ++i ) {
-      webpage += i;
-      webpage += F(": ");
-      webpage += arrInfo[i];
-      webpage += F(", ");
+    webpage += F("Pump: ");
+    webpage += webparsedresponse[1];
+    getsenorinfo(webparsedresponse[1]);
+    webpage += F("<br>");
+    for (i = 0 ; i < 4 ; ++i ) {
+      if (arrInfo[i] >= 0) {
+        webpage += F("Sensor: ");
+        webpage += i;
+        webpage += F("- ");
+        webpage += arrInfo[i];
+        webpage += F("<br>");
+      }
     }
     webpage += F("</h2>");
   }
   else {
     // return main page
-    webpage = F("<h1>Automatic watering system</h1><h2>");
     webpage += F("<form action=""/"">");
     webpage += F("Pump selection:<br>");
     webpage += F("<input type=""text"" name=""pin"" value=""><br>");
+    webpage += F("Water: <input type=""checkbox"" name=""on"" value=""1""><br>");
     webpage += F("<input type=""submit"" value=""Submit"">");
     webpage += F("</form>");
-    webpage += F("Enable display:<br>");
-    webpage += F("<input type=""text"" name=""lcd"" value=""><br>");
-    webpage += F("<input type=""submit"" value=""Submit"">");
+    webpage += F("Display:");
+    if (lcdon) {
+      webpage += F("on");
+    } else {
+      webpage += F("off");
+    }
+    webpage += F("<br>");
+    webpage += F("<form action=""/"">");
+    webpage += F("<input type=""hidden"" name=""lcd"" value=""1"">");
+    webpage += F("<input type=""submit"" value=""ON/OFF""/>");
     webpage += F("</form>");
     webpage += F("</h2>");
   }
@@ -221,12 +283,13 @@ void reply8266() {
   //clear webpage
   webpage = "";
 }
-void info(int i) {
+void getsenorinfo(int i) {
   // get info from all enabled sensors for pump i
-  arrInfo[1] = i;
-  for (j = 0 ; i < 5 ; ++i ) {
+  for (j = 1 ; j < 5 ; ++j ) {
     if (sys[i][j] >= 0 ) {
-      arrInfo[j] = analogRead('a' + sys[i][j]);
+      arrInfo[j - 1] = analogRead(sys[i][j]);
+    } else {
+      arrInfo[j - 1] = -1;
     }
   }
 }
@@ -269,29 +332,27 @@ void writetodisplay(String t) {
     display.setFont(u8g2_font_ncenB08_tr);
     display.setCursor(0, 15);
     display.print(t);
-  } while ( display.nextPage() );
+  } while ( display.nextPage() ); //todo: fix to write two lines
 }
 
 void InitWifiModule() {
   // initialise esp8266
   sendData(F("AT+RST"), 2000); // reset
   delay(1000);
-  sendData(F("AT+CWMODE=1"), 1000);
+  sendData(F("AT+CWMODE=1"), 1000); // enable connection to wireless
   delay(1000);
-  sendData(F("AT+CWHOSTNAME=\""HOSTNAME"\""), 1000); // fisken\"\r\n", 1000);
+  sendData(F("AT+CWHOSTNAME=\""HOSTNAME"\""), 1000); // set hostname of esp8266
   delay(1000);
-  sendData(F("AT+CWJAP_CUR=\""SSID"\",\""PASSWORD"\""), 2000);
+  sendData(F("AT+CWJAP_CUR=\""SSID"\",\""PASSWORD"\""), 2000); // login to wifi network
   delay(5000);
-  // sendData("AT+CIFSR", 1000); // Show IP Adress
-  sendData(F("AT+CIPMUX=1"), 1000); // Multiple conexions
+  sendData(F("AT+CIPMUX=1"), 1000); // Multiple connections (5)
   delay(1000);
-  sendData(F("AT+CIPSERVER=1,"WEBSERVERPORT""), 1000); // start comm port 80
+  sendData(F("AT+CIPSERVER=1,"WEBSERVERPORT""), 1000); // start webserver at port
 }
 
 void emptyserialbuffer() {
   // empty serial buffer
-  while (Serial.available())
-  {
+  while (Serial.available()) {
     Serial.read();
   }
 }
@@ -302,8 +363,7 @@ void sendData(String command, const int timeout) {
   // add delay
   delay(100);
   long int time = millis();
-  while ( (time + timeout) > millis())
-  {
+  while ( (time + timeout) > millis()) {
     emptyserialbuffer();
   }
 }
