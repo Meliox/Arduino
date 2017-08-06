@@ -17,14 +17,14 @@ U8G2_SSD1306_128X32_UNIVISION_1_HW_I2C display(U8G2_R0, SCL, SDA, U8X8_PIN_NONE)
 // pump is [i][0], while any associated sensor is the next [0][i], e.g. 4 sensors possible per pump
 int sys[5][5] = {
   {2, 0, -1, -1, -1} ,
-  {3, -1, -1, -1, -1} ,
+  { -1, -1, -1, -1, -1} ,
   { -1, -1, -1, -1, -1} ,
   { -1, -1, -1, -1, -1} ,
   { -1, -1, -1, -1, -1} ,
 };
 // limit
 #define PUMPTIME "2000"
-#define SENSORLIMIT "200"
+#define SENSORLIMIT "350"
 #define CHECKINTERVAL "900000" // how often to check the sensors for each pump
 
 // CODE BELOW
@@ -42,7 +42,7 @@ long int lastupdate[5] = { -1, -1, -1, -1, -1};
 long int lastdisplayupdate;
 String webpage;
 String displaytext;
-boolean lcdon = true;
+boolean lcdon = false;
 short int lcdloop = 0;
 
 ////////////////////////////////////////////////////////////////////////////////////////
@@ -53,8 +53,8 @@ void setup(void) {
   // start display
   display.begin();
   writetodisplay(F("Initialising wifi"));
-  reset8266();
   Serial.begin(115200);
+  reset8266();
   InitWifiModule(); // Iniciate module as WebServer
   writetodisplay(F("Done"));
   delay(1000);
@@ -64,14 +64,14 @@ void setup(void) {
 /* draw something on the display with the `firstPage()`/`nextPage()` loop*/
 void loop(void) {
   check8266(); // check webserver and respond
- // updatedisplay(); // update display information
+  updatedisplay(); // update display information
   checksensors(); // check sensors and pump water is deemed necessary
 }
 
 void updatedisplay() {
   // limit updating of the display
   if (lcdon) {
-    if (millis() >= lastdisplayupdate + 60000) {
+    if (millis() >= (lastdisplayupdate + 10000)) {
       // only display information for enabled pumps
       while (sys[lcdloop][0] < 0) {
         ++lcdloop;
@@ -83,7 +83,7 @@ void updatedisplay() {
       // Assembly display message
       displaytext = F("P: ");
       displaytext += lcdloop;
-      displaytext = F(" ");
+      displaytext += F(" ");
       getsenorinfo(lcdloop);
       for (i = 0 ; i < 4 ; ++i ) {
         if (arrInfo[i] >= 0) {
@@ -93,20 +93,19 @@ void updatedisplay() {
           displaytext += arrInfo[i];
           displaytext += F(",");
         }
-        // Print to display
-        writetodisplay(displaytext);
-        ++lcdloop;
       }
+      // Print to display
+      writetodisplay(displaytext);
       // reset loop
       if (lcdloop >= 4 ) {
         lcdloop = 0;
+      } else {
+        ++lcdloop;
       }
       // clear display text and pause display update
-      displaytext;
+      displaytext = "";
       lastdisplayupdate = millis();
     }
-  } else {
-    display.clear();
   }
 }
 
@@ -125,6 +124,7 @@ void check8266() {
     // check if 8266 is sending data
     if (Serial.find("+IPD,")) {
       // look for an reponse
+      Serial.println("reading");
       read8266();
       parseresponse8266();
       reply8266();
@@ -198,18 +198,17 @@ void parseresponse8266() {
   }
   //reset data
   serialmessage[32];
+  receivedChars[32];
   newData = false;
 }
 
 int parser(char arr[], int i) {
   // parse int from esp8266 response
-  //strcasestr
   char * strtokIndx;
   strtokIndx = strtok(arr, ", =&");
   int arr2[8];
   j = 0;
-  while ((strtokIndx != NULL))
-  {
+  while ((strtokIndx != NULL)) {
     arr2[j] = atoi(strtokIndx);
     strtokIndx = strtok(NULL, ", =&");
     ++j;
@@ -219,7 +218,7 @@ int parser(char arr[], int i) {
 
 void reply8266() {
   // parse reply from esp8266 and return a response based on reply
-  webpage = F("<h1>Auto water sys</h1><h2>");
+  webpage = F("<h1>Water sys</h1><h2>");
   if (webparsedresponse[1] >= 0 && webparsedresponse[2] == 1 ) {
     // selected pump must be turned on
     pumpwater(webparsedresponse[1]);
@@ -238,7 +237,7 @@ void reply8266() {
       if (arrInfo[i] >= 0) {
         webpage += F("Sensor: ");
         webpage += i;
-        webpage += F("- ");
+        webpage += F(",");
         webpage += arrInfo[i];
         webpage += F("<br>");
       }
@@ -246,11 +245,11 @@ void reply8266() {
     webpage += F("</h2>");
   }
   else {
-    // return main page
+    // main page
     webpage += F("<form action=""/"">");
-    webpage += F("Pump selection:<br>");
+    webpage += F("Pump selc:<br>");
     webpage += F("<input type=""text"" name=""pin"" value=""><br>");
-    webpage += F("Water: <input type=""checkbox"" name=""on"" value=""1""><br>");
+    webpage += F("Water:<input type="" checkbox"" name=""on"" value=""1""><br>");
     webpage += F("<input type=""submit"" value=""Submit"">");
     webpage += F("</form>");
     webpage += F("Display:");
@@ -299,8 +298,9 @@ void read8266() {
   static byte ndx = 0;
   char endMarker = '\n';
   char rc;
-  while (Serial.available() > 0 && newData == false) {
+  while (Serial.available() > 0 && newData == false) {  
     rc = Serial.read();
+    Serial.println(rc);
     if (rc != endMarker) {
       receivedChars[ndx] = rc;
       ndx++;
@@ -314,6 +314,12 @@ void read8266() {
       newData = true;
     }
   }
+  Serial.println(newData);
+  Serial.print("h: ");
+  for (i = 0; i < 32 ; ++i) {
+    Serial.print(receivedChars[i]);
+  }
+  Serial.println("");
   // empty buffer
   emptyserialbuffer();
 }
@@ -327,12 +333,29 @@ void reset8266 () {
 }
 
 void writetodisplay(String t) {
-  display.firstPage();
-  do {
-    display.setFont(u8g2_font_ncenB08_tr);
-    display.setCursor(0, 15);
-    display.print(t);
-  } while ( display.nextPage() ); //todo: fix to write two lines
+  // display only handles 50 char at a time in two lines
+  if (t.length() < 50 ) {
+    display.firstPage();
+    do {
+      display.setFont(u8g2_font_ncenB08_tr);
+      if ( t.length() > 25 ) {
+        display.setCursor(0, 10);
+        display.print(t.substring(1, 25));
+        display.setCursor(0, 25);
+        display.print(t.substring(26, 50));
+      } else {
+        display.setCursor(0, 10);
+        display.print(t);
+      }
+    } while ( display.nextPage() ); //todo: fix to write two lines
+  } else {
+    display.firstPage();
+    do {
+      display.setFont(u8g2_font_ncenB08_tr);
+      display.setCursor(0, 10);
+      display.print(F("error"));
+    } while ( display.nextPage() );
+  }
 }
 
 void InitWifiModule() {
