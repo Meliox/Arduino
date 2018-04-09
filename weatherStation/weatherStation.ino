@@ -1,41 +1,66 @@
+#include <HTTPClient.h> // for https communication
 #include <TimeLib.h> //maybe not needed
 #include <Time.h> //maybe not needed
 #include <WiFi.h>
 //#include <Wire.h>
 #include <ArduinoJson.h> // https://github.com/bblanchon/ArduinoJson
 #include <WiFiUdp.h> // needed to get time
+#include <HardwareSerial.h> // to communicate with nextion display
+
+// nextion display sdcard has to be FAT32+2048 cluster
 
 #define DEBUG
 
 //constants
 
 // Wifi configuration
-char* ssid = "";
-char* password = "";
+const char* ssid = "";
+const char* password = "";
 
-WiFiServer server(80);
+//WiFiServer server(80);
 
 // Time configuration, e.g. NTP server
 unsigned int localPort = 2390;                  // local port to listen for UDP packets
 IPAddress timeServerIP;                         // IP address of random server 
 const char* ntpServerName = "europe.pool.ntp.org";     // server pool
 byte packetBuffer[48];                          // buffer to hold incoming and outgoing packets
-int timeZoneoffsetGMT = 3600;                   // offset from Greenwich Meridan Time
+const int timeZoneoffsetGMT = 3600;                   // offset from Greenwich Meridan Time
 boolean DST = true;                            // daylight saving time
 WiFiUDP clockUDP;                               // initialize a UDP instance
 
+const String apiURL = "https://api.darksky.net/forecast/";
+const String APIKEY = "";
+const String location = "";
+const String unit = "si";
 
-char * servername = "api.openweathermap.org";          // remote server with weather info
-String APIKEY = "";   // personal api key for retrieving the weather data
-
-const int httpPort = 80;
-
-// a list of cities you want to display the forecast for
-// get the ID at https://openweathermap.org/
-// type the city, click search and click on the town
-// then check the link, like this: https://openweathermap.org/city/5128581
-// 5128581 is the ID for New York
-String cityID = "2618425";  // Copenhagen
+const char* ca_cert = \
+"-----BEGIN CERTIFICATE-----\n" \
+"MIIElDCCA3ygAwIBAgIQAf2j627KdciIQ4tyS8+8kTANBgkqhkiG9w0BAQsFADBh\n" \
+"MQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3\n" \
+"d3cuZGlnaWNlcnQuY29tMSAwHgYDVQQDExdEaWdpQ2VydCBHbG9iYWwgUm9vdCBD\n" \
+"QTAeFw0xMzAzMDgxMjAwMDBaFw0yMzAzMDgxMjAwMDBaME0xCzAJBgNVBAYTAlVT\n" \
+"MRUwEwYDVQQKEwxEaWdpQ2VydCBJbmMxJzAlBgNVBAMTHkRpZ2lDZXJ0IFNIQTIg\n" \
+"U2VjdXJlIFNlcnZlciBDQTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEB\n" \
+"ANyuWJBNwcQwFZA1W248ghX1LFy949v/cUP6ZCWA1O4Yok3wZtAKc24RmDYXZK83\n" \
+"nf36QYSvx6+M/hpzTc8zl5CilodTgyu5pnVILR1WN3vaMTIa16yrBvSqXUu3R0bd\n" \
+"KpPDkC55gIDvEwRqFDu1m5K+wgdlTvza/P96rtxcflUxDOg5B6TXvi/TC2rSsd9f\n" \
+"/ld0Uzs1gN2ujkSYs58O09rg1/RrKatEp0tYhG2SS4HD2nOLEpdIkARFdRrdNzGX\n" \
+"kujNVA075ME/OV4uuPNcfhCOhkEAjUVmR7ChZc6gqikJTvOX6+guqw9ypzAO+sf0\n" \
+"/RR3w6RbKFfCs/mC/bdFWJsCAwEAAaOCAVowggFWMBIGA1UdEwEB/wQIMAYBAf8C\n" \
+"AQAwDgYDVR0PAQH/BAQDAgGGMDQGCCsGAQUFBwEBBCgwJjAkBggrBgEFBQcwAYYY\n" \
+"aHR0cDovL29jc3AuZGlnaWNlcnQuY29tMHsGA1UdHwR0MHIwN6A1oDOGMWh0dHA6\n" \
+"Ly9jcmwzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydEdsb2JhbFJvb3RDQS5jcmwwN6A1\n" \
+"oDOGMWh0dHA6Ly9jcmw0LmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydEdsb2JhbFJvb3RD\n" \
+"QS5jcmwwPQYDVR0gBDYwNDAyBgRVHSAAMCowKAYIKwYBBQUHAgEWHGh0dHBzOi8v\n" \
+"d3d3LmRpZ2ljZXJ0LmNvbS9DUFMwHQYDVR0OBBYEFA+AYRyCMWHVLyjnjUY4tCzh\n" \
+"xtniMB8GA1UdIwQYMBaAFAPeUDVW0Uy7ZvCj4hsbw5eyPdFVMA0GCSqGSIb3DQEB\n" \
+"CwUAA4IBAQAjPt9L0jFCpbZ+QlwaRMxp0Wi0XUvgBCFsS+JtzLHgl4+mUwnNqipl\n" \
+"5TlPHoOlblyYoiQm5vuh7ZPHLgLGTUq/sELfeNqzqPlt/yGFUzZgTHbO7Djc1lGA\n" \
+"8MXW5dRNJ2Srm8c+cftIl7gzbckTB+6WohsYFfZcTEDts8Ls/3HB40f/1LkAtDdC\n" \
+"2iDJ6m6K7hQGrn2iWZiIqBtvLfTyyRRfJs8sjX7tN8Cp1Tm5gr8ZDOo0rwAhaPit\n" \
+"c+LJMto4JQtV05od8GiG7S5BNO98pVAdvzr508EIDObtHopYJeS4d60tbvVS3bR0\n" \
+"j6tJLp07kzQoH3jOlOrHvdPJbRzeXDLz\n" \
+"-----END CERTIFICATE-----\n";
 
 // 
 // settings
@@ -50,7 +75,29 @@ int timeServerResyncNumOfLoops = 3000;        // number of loops before refreshi
 int timeServerResyncNumOfLoopsCounter = 0;
 boolean timeServerConnected = false;          // is set to true when the time is read from the server
 
+HardwareSerial nexSerial(2);
+
+long int weatherDayLastUpdate = 0;
+const int weatherDayUpdateTime = 900000; //time in ms
+
+long int timeLastUpdate = 0;
+const int timeUpdateTime = 60000; //time in ms
+
+String myIP;
+
 void setup() {
+	// intialise connection to nextion display
+	nexSerial.begin(115200, SERIAL_8N1, 19, 22);
+	endNextionCommand();
+	//set baud rate for Nextion display
+	//nexSerial.print("bauds=115200");
+	//endNextionCommand();
+	// lower light
+	nexSerial.print("dim=50");
+	endNextionCommand();
+	// reset display
+	nexSerial.print("page 0");
+	endNextionCommand();
 	// start wifi
 	connectToWifi();
 
@@ -58,14 +105,80 @@ void setup() {
 	clockUDP.begin(localPort);
 	getTimeFromServer();
 	// current time can be seen using now().
-
+	
 }
 
 void loop() {
-	Serial.println(now());
-	Serial.println(hour());
-	//getWeatherData();
-	delay(10000);
+	//while (nexSerial.available() > 0) {
+	//	for (int i = 1; i < 16; i++) {
+	//		array[i] = nexSerial.read();
+	//		Serial.println(array[i]);
+	//		delay(20);
+	//	}
+	//}
+	//nexSerial.write(now());
+	updateOrDisplayTime(1);
+	//getWeather();
+	
+#ifdef DEBUG
+	delay(500);
+#endif
+}
+
+String doubleDigit(int number) {
+	// converts a single digit into a double digit number
+	String tmp;
+	if (number < 10) {
+		tmp += "0";
+		tmp += String(number);
+		return tmp;
+	}
+	else {
+		tmp = String(number);
+		return tmp;
+	}
+}
+
+void updateOrDisplayTime(uint8_t type){
+	// 1 updates time on display
+	// 2 prints time to serial
+	if ((type = 1) && (type = 2)) {
+		String timeDate;
+		timeDate += doubleDigit(hour());
+		timeDate += ':';
+		timeDate += doubleDigit(minute());
+		if (type = 2) {
+			timeDate += ':';
+			timeDate += doubleDigit(second());
+			timeDate += ' ';
+		}
+		else {
+			timeDate += ' ';
+		}
+		String tmp = dayStr(weekday());
+		timeDate += tmp.substring(0, 3); //show three letter day, e.g. fri.
+		timeDate += '-';
+		timeDate += day();
+		timeDate += '/';
+		timeDate += month();
+		timeDate += '/';
+		timeDate += year();
+		if (type = 1) {
+			if (millis() >= timeLastUpdate) {
+				timeLastUpdate = millis() + timeUpdateTime; // next update time
+#ifdef DEBUG
+				Serial.print("Time updated: ");
+				Serial.print(timeDate);
+				Serial.println();
+				sendToLCD(1, "time", timeDate);
+#endif
+			}
+		}
+		else if (type = 2) {
+			Serial.print(timeDate);
+			Serial.println();
+		}
+	}
 }
 
 void connectToWifi() {
@@ -77,6 +190,7 @@ void connectToWifi() {
 	WiFi.begin(ssid, password);
 	while (WiFi.status() != WL_CONNECTED) {
 		delay(500);
+		myIP = WiFi.localIP().toString();
 #ifdef DEBUG
 		Serial.print(".");
 #endif	
@@ -129,18 +243,8 @@ void getTimeFromServer() {
 		}
 		setTime(unixTime);
 #ifdef DEBUG
-		Serial.print(hour());
-		Serial.print(":");
-		Serial.print(minute());
-		Serial.print(":");
-		Serial.print(second());
-		Serial.print(" ");
-		Serial.print(day());
-		Serial.print("-");
-		Serial.print(month());
-		Serial.print("-");
-		Serial.print(year());
-		Serial.println();
+		Serial.print("Time received: ");
+		updateOrDisplayTime(2);
 #endif
 	}
 }
@@ -162,114 +266,83 @@ unsigned long sendNTPpacket(IPAddress& address) {
 	clockUDP.endPacket();
 }
 
-void getWeatherData() //client function to send/receive GET request data.
-{
-	WiFiClient client;
-	if (!client.connect(servername, httpPort)) {
-		return;
+void getWeather(){
+	if (millis() >= weatherDayLastUpdate ) {
+		getWeatherData();
+		weatherDayLastUpdate = millis() + weatherDayUpdateTime; // next update time
+#ifdef DEBUG
+		Serial.print("Daily weather updated: ");
+		updateOrDisplayTime(2);
+		Serial.println();
+#endif
 	}
-	String url = "/data/2.5/forecast?id=" + cityID + "&units=metric&cnt=1&APPID=" + APIKEY;
-	//String url = "/data/2.5/weather?id=" + cityID + "&units=metric&cnt=1&APPID=" + APIKEY;
-	//check weather properties at https://openweathermap.org/current
+}
 
-	// This will send the request to the server
-	client.print(String("GET ") + url + " HTTP/1.1\r\n" + "Host: " + servername + "\r\n" + "Connection: close\r\n\r\n");
-	unsigned long timeout = millis();
-	while (client.available() == 0) {
-		if (millis() - timeout > 5000) {
-			client.stop();
-			return;
+void getWeatherData(){
+	String tmp;
+	if ((WiFi.status() == WL_CONNECTED)) {
+		HTTPClient http;
+		String url = apiURL + APIKEY + "/" + location + "?" + "unit=" + unit + "&exclude=flags,alerts,minutely,daily,hourly"; // current
+#ifdef DEBUG
+		Serial.println(url);
+#endif
+
+		http.begin(url, ca_cert); //Specify the URL and certificate
+		int httpCode = http.GET();                                                  //Make the request
+		if (httpCode > 0) { //Check for the returning code
+			result = http.getString();
+#ifdef DEBUG
+			Serial.println(httpCode);
+			Serial.println(result);
+#endif
 		}
-	}
+		else {
+			Serial.println(httpCode);
+			Serial.println("Error on HTTP request");
+		}
 
-	result = "";
-	// Read all the lines of the reply from server
-	while (client.available()) {
-		result = client.readStringUntil('\r');
-	}
+		http.end(); //Free the resources
 
-	result.replace('[', ' ');
-	result.replace(']', ' ');
+		//result.replace('[', ' ');
+		//result.replace(']', ' ');
 
-	char jsonArray[result.length() + 1];
-	result.toCharArray(jsonArray, sizeof(jsonArray));
-	jsonArray[result.length() + 1] = '\0';
+		char jsonArray[result.length() + 1];
+		result.toCharArray(jsonArray, sizeof(jsonArray));
+		jsonArray[result.length() + 1] = '\0';
 
-	StaticJsonBuffer<1024> json_buf;
-	JsonObject &root = json_buf.parseObject(jsonArray);
-	if (!root.success()){
-		Serial.println("parseObject() failed");
-	}
-	//check properties forecasts at https://openweathermap.org/forecast5
+		StaticJsonBuffer<1000> json_buf;
+		JsonObject &root = json_buf.parseObject(jsonArray);
+		if (!root.success()) {
+			Serial.println("parseObject() failed");
+		}
 
-	int weatherID = root["list"]["weather"]["id"];
+		String tmp0 = root["currently"]["icon"]; //weather icon
+		int tmp1 = root["currently"]["temperature"]; //temperature
+		int tmp2 = root["currently"]["humidity"]; //humidity
+		int tmp3 = root["currently"]["pressure"]; //pressure
+		int tmp4 = root["currently"]["windSpeed"]; //windSpeed
+		int tmp5 = root["currently"]["uvIndex"]; //uvIndex
+		int tmp6 = root["currently"]["windBearing"]; //windBearing
 
-	String tmp0 = root["city"]["name"];
-	String tmp1 = root["list"]["weather"]["main"];
-	String tmp2 = root["list"]["weather"]["description"];
-	float  tmp3 = root["list"]["main"]["temp_min"];
-	float  tmp4 = root["list"]["main"]["temp_max"];
-	float  tmp5 = root["list"]["main"]["humidity"];
-	float  tmp6 = root["list"]["clouds"]["all"];
-	float  tmp7 = root["list"]["rain"]["3h"];
-	float  tmp8 = root["list"]["snow"]["3h"];
-	float  tmp9 = root["list"]["wind"]["speed"];
-	int    tmp10 = root["list"]["wind"]["deg"];
-	float  tmp11 = root["list"]["main"]["pressure"];
-	//String tmp12 = root["list"]["dt_text"]; command = command + tmp12;
+		sendToLCD(1, "pressure", String(setWeatherPicture(tmp0)));
+		sendToLCD(1, "pressure", String(round(tmp1)));
+		sendToLCD(1, "uvIndex", String(round(tmp5)));
 
-//#if !defined (DEBUG_NO_PAGE_FADE)
-//	displayFadeOut(displayDimValue, dimPageDelay);
-//#endif
-//
-//	printNextionCommand("page 1");
-//
-//#if !defined (DEBUG_NO_PAGE_FADE)
-//	displayFadeIn(0, displayDimValue, dimPageDelay);
-//#endif
+		//properly display wind and direction
+		tmp = String(round(tmp4));
+		tmp += "m/s - ";
+		tmp += getShortWindDirection(tmp6);
+		sendToLCD(1, "windADir", tmp);
 
-	setWeatherPicture(weatherID);
-	sendToLCD(1, "city", tmp0);
-	sendToLCD(1, "description", tmp2);
-	sendToLCD(1, "humidity", String(tmp5, 0));
-	sendToLCD(1, "rain", String(tmp7, 1));
-	sendToLCD(1, "wind_dir", getShortWindDirection(tmp10));
-	sendToLCD(1, "wind_speed", String(tmp9, 1));
-	sendToLCD(1, "pressure", String(tmp11, 0));
-	sendToLCD(1, "clouds", String(tmp6, 0));
-	sendToLCD(1, "temp_min", String(tmp3, 1));
-	sendToLCD(1, "temp_max", String(tmp4, 1));
+		//properly display humidity
+		tmp = String(round(tmp2));
+		tmp += " %";
+		sendToLCD(1, "humidity", tmp);
 
-	//sendToLCD(1, "weather_ID", String(weatherID, 0));
-}
-
-void sendToLCD(uint8_t type, String index, String cmd) {
-	Serial.println();
-	Serial.print(index);
-	Serial.print(": ");
-	Serial.print(cmd);
-}
-
-
-String getWindDirection(int degrees) {
-	int sector = ((degrees + 11) / 22.5 - 1);
-	switch (sector) {
-	case 0: return "north";
-	case 1: return "nort-northeast";
-	case 2: return "northeast";
-	case 3: return "east-northeast";
-	case 4: return "east";
-	case 5: return "east-southeast";
-	case 6: return "southeast";
-	case 7: return "south-southeast";
-	case 8: return "south";
-	case 9: return "south-southwest";
-	case 10: return "southwest";
-	case 11: return "west-southwest";
-	case 12: return "west";
-	case 13: return "west-northwest";
-	case 14: return "northwest";
-	case 15: return "north-northwest";
+		//properly display pressure
+		tmp = String(round(tmp3));
+		tmp += " hPa";
+		sendToLCD(1, "pressure", tmp);
 	}
 }
 
@@ -295,72 +368,48 @@ String getShortWindDirection(int degrees) {
 	}
 }
 
-void setWeatherPicture(int weatherID) {
-	switch (weatherID)
-	{
-	case 200:
-	case 201:
-	case 202:
-	case 210: sendToLCD(3, "weatherpic", "26"); break; // tstorm1
-	case 211: sendToLCD(3, "weatherpic", "27"); break; // tstorm2
-	case 212: sendToLCD(3, "weatherpic", "28"); break; // tstorm3
-	case 221:
-	case 230:
-	case 231:
-	case 232: sendToLCD(3, "weatherpic", "27"); break; // tstorm2
-
-	case 300:
-	case 301:
-	case 302:
-	case 310:
-	case 311:
-	case 312:
-	case 313:
-	case 314:
-	case 321: sendToLCD(3, "weatherpic", "15"); break; // rain1
-
-	case 500:
-	case 501: sendToLCD(3, "weatherpic", "15"); break; // rain1
-	case 502:
-	case 503:
-	case 504: sendToLCD(3, "weatherpic", "16"); break; // rain2
-	case 511:
-	case 520:
-	case 521: sendToLCD(3, "weatherpic", "17"); break; // shower1
-	case 522:
-	case 531: sendToLCD(3, "weatherpic", "18"); break; // shower2
-
-	case 600: sendToLCD(3, "weatherpic", "20"); break; // snow1
-	case 601: sendToLCD(3, "weatherpic", "22"); break; // snow3
-	case 602: sendToLCD(3, "weatherpic", "24"); break; // snow5
-	case 611:
-	case 612: sendToLCD(3, "weatherpic", "14"); break; // sleet
-	case 615: sendToLCD(3, "weatherpic", "20"); break; // snow1
-	case 616: sendToLCD(3, "weatherpic", "22"); break; // snow3
-	case 620: sendToLCD(3, "weatherpic", "20"); break; // snow1
-	case 621: sendToLCD(3, "weatherpic", "22"); break; // snow3
-	case 622: sendToLCD(3, "weatherpic", "24"); break; // snow5
-
-	case 701:
-	case 711:
-	case 721: sendToLCD(3, "weatherpic", "13"); break; // mist
-	case 731: sendToLCD(3, "weatherpic", "10"); break; // dunno
-	case 741: sendToLCD(3, "weatherpic", "11"); break; // fog
-	case 751:
-	case 761:
-	case 762:
-	case 771:
-	case 781: sendToLCD(3, "weatherpic", "10"); break; // dunno
-
-	case 800: sendToLCD(3, "weatherpic", "25"); break; // sunny
-	case 801: sendToLCD(3, "weatherpic", "5"); break; // cloud1
-	case 802: sendToLCD(3, "weatherpic", "7"); break; // cloud3
-	case 803: sendToLCD(3, "weatherpic", "8"); break; // cloud4
-	case 804: sendToLCD(3, "weatherpic", "14"); break; // overcast
-
-	case 906: sendToLCD(3, "weatherpic", "12"); break; // hail
-
-	default: sendToLCD(3, "weatherpic", "10"); break; // dunno
+int setWeatherPicture(String icon) {
+	if (icon == "clear - day") {
+		return 81;
+	}
+	else if (icon == "clear-night") {
+		return 80;
+	}
+	else if (icon == "rain") {
+		return 60;
+	}
+	else if (icon == "snow") {
+		return 62;
+	}
+	else if (icon == "sleet") {
+		return 67;
+	}
+	else if (icon == "wind") {
+		return 72;
+	}
+	else if (icon == "fog") {
+		return 69;
+	}
+	else if (icon == "cloudy") {
+		return 75;
+	}
+	else if (icon == "partly-cloudy-day") {
+		return 79;
+	}
+	else if (icon == "partly-cloudy-night") {
+		return 78;
+	}
+	else if (icon == "hail") {
+		return 84;
+	}
+	else if (icon == "thunderstorm") {
+		return 49;
+	}
+	else if (icon == "tornado") {
+		return 50;
+	}
+	else {
+		return 97; //unknown - not supported
 	}
 }
 
@@ -372,33 +421,58 @@ void delayCheckTouch(int delayTime) {
 	}
 }
 
-String dayAsString(int day) {
-	switch (day) {
-	case 1: return "Sunday";
-	case 2: return "Monday";
-	case 3: return "Tuesday";
-	case 4: return "Wednessday";
-	case 5: return "Thursday";
-	case 6: return "Friday";
-	case 7: return "Saturday";
-	}
-	return "";
+void endNextionCommand() {
+	nexSerial.write(0xff);
+	nexSerial.write(0xff);
+	nexSerial.write(0xff);
 }
 
-String monthAsString(int month) {
-	switch (month) {
-	case 1:  return "January";
-	case 2:  return "February";
-	case 3:  return "March";
-	case 4:  return "April";
-	case 5:  return "May";
-	case 6:  return "June";
-	case 7:  return "July";
-	case 8:  return "August";
-	case 9:  return "September";
-	case 10: return "October";
-	case 11: return "November";
-	case 12: return "December";
+void sendToLCD(uint8_t type, String index, String cmd) {
+#ifdef DEBUG
+	Serial.print("toDisplay:");
+	Serial.print(type);
+	Serial.print(":");
+	Serial.print(index);
+	Serial.print(":");
+	Serial.print(cmd);
+#endif // DEBUG
+	if (type == 1) {
+		nexSerial.print(index);
+		nexSerial.print(".txt=");
+		nexSerial.print("\"");
+		nexSerial.print(cmd);
+		nexSerial.print("\"");
 	}
-	return "";
+	else if (type == 2) {
+		nexSerial.print(index);
+		nexSerial.print(".val=");
+		nexSerial.print(cmd);
+	}
+	else if (type == 3) {
+		nexSerial.print(index);
+		nexSerial.print(".pic=");
+		nexSerial.print(cmd);
+	}
+	else if (type == 4) {
+		nexSerial.print("page ");
+		nexSerial.print(cmd);
+	}
+
+	endNextionCommand();
 }
+
+#ifdef DEBUG
+	void currentTime() {
+		Serial.print(hour());
+		Serial.print(":");
+		Serial.print(minute());
+		Serial.print(":");
+		Serial.print(second());
+		Serial.print(" ");
+		Serial.print(day());
+		Serial.print("-");
+		Serial.print(month());
+		Serial.print("-");
+		Serial.print(year());
+	}
+#endif
