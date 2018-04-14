@@ -1,6 +1,6 @@
 #include <NTPClient.h>
 #include <HTTPClient.h> // for https communication
-#include <Timezone.h>
+#include <Timezone.h> // https://github.com/JChristensen/Timezone
 #include <Time.h> //maybe not needed
 #include <WiFi.h>
 #include <ArduinoJson.h> // https://github.com/bblanchon/ArduinoJson
@@ -8,12 +8,12 @@
 #include <HardwareSerial.h> // to communicate with nextion display
 
 // nextion display sdcard has to be FAT32+2048 cluster
-
-#define DEBUG
-//#define DEBUGALL
-
-//constants
-const char* version = "1.0";
+//set baud rate for Nextion display
+//nexSerial.print("bauds=115200");
+//endNextionCommand();
+//enable code debugging below
+//#define DEBUG //simple debug
+//#define DEBUGALL //display json response from forecast api
 
 // Wifi configuration
 const char* ssid = "";
@@ -22,21 +22,42 @@ const char* wifiHostname = "";
 
 //WiFiServer server(80);
 
-// Time configuration, e.g. NTP server
-unsigned int localPort = 2390;                  // local port to listen for UDP packets
-IPAddress timeServerIP;                         // IP address of random server 
-const char* ntpServerName = "europe.pool.ntp.org";     // server pool
-byte packetBuffer[48];                          // buffer to hold incoming and outgoing packets
-const int timeZoneOffset = 60;                   // offset from Greenwich Meridan Time
+// Time configuration
+const char* ntpServerName = "europe.pool.ntp.org";     //server pool
+const int timeZoneOffset = 60;                   //offset from Greenwich Meridan Time
 TimeChangeRule myDST = { "GMT", Fourth, Sun, Mar, 2, timeZoneOffset };  //UTC+1
 TimeChangeRule mySTD = { "DST", Fourth, Sun, Nov, 3, timeZoneOffset+60 };   //UTC +2
 
-WiFiUDP clockUDP;                               // initialize a UDP instance
-const String apiURL = F("https://api.darksky.net/forecast/");
-const String APIKEY = F("");
-const String location = F("55.67,12.56");
-const String unit = F("si");
 
+const String apiURL = F("https://api.darksky.net/forecast/"); //url to forecast api
+const String APIKEY = F(""); //api key
+const String location = F(""); //location in latitude, longitude
+const String unit = F("si"); //unit returned by forecast api
+
+const int weatherCurrentUpdateTime = 30; //time in mins
+const int weatherForecastUpdateTime = 180; //time in mins
+const int screensaverChangeTime = 60; //change time in seconds
+const int timeoutToWeatherMainDisplay = 15; //timeout in seconds to return to main weather display if page is changed manually or screensaver is on
+
+//global variables
+long int weatherDayLastUpdate = 0;
+long int weatherForecastLastUpdate = 0;
+long int returnToWeatherMainNewTime = 0;
+long int timeNewUpdate = 0;
+String timeTmp = "0";
+long int screensaverNewTime = 0;
+Timezone myTZ(myDST, mySTD);
+
+//code
+const char* version = "1.0"; //weather station version
+HardwareSerial nexSerial(2);					//hardware port used on arduino for Nextion display
+WiFiUDP clockUDP;                               // initialize a UDP instance
+unsigned int localPort = 2390;                  // local port to listen for UDP packets
+IPAddress timeServerIP;                         // IP address of random server 
+byte packetBuffer[48];                          // buffer to hold incoming and outgoing packets
+int timeServerDelay = 1000;                   // delay for the time server to reply
+int timeServerPasses = 4;                     // number of tries to connect to the time server before timing out
+boolean timeServerConnected = false;          // is set to true when the time is read from the server
 const char* ca_cert = \
 "-----BEGIN CERTIFICATE-----\n" \
 "MIIElDCCA3ygAwIBAgIQAf2j627KdciIQ4tyS8+8kTANBgkqhkiG9w0BAQsFADBh\n" \
@@ -64,29 +85,7 @@ const char* ca_cert = \
 "2iDJ6m6K7hQGrn2iWZiIqBtvLfTyyRRfJs8sjX7tN8Cp1Tm5gr8ZDOo0rwAhaPit\n" \
 "c+LJMto4JQtV05od8GiG7S5BNO98pVAdvzr508EIDObtHopYJeS4d60tbvVS3bR0\n" \
 "j6tJLp07kzQoH3jOlOrHvdPJbRzeXDLz\n" \
-"-----END CERTIFICATE-----\n";
-
-int timeServerDelay = 1000;                   // delay for the time server to reply
-int timeServerPasses = 4;                     // number of tries to connect to the time server before timing out
-											  //int timeServerResyncNumOfLoops = 3000;        // number of loops before refreshing the time. one loop takes approx. 28 seconds
-											  //int timeServerResyncNumOfLoopsCounter = 0;
-boolean timeServerConnected = false;          // is set to true when the time is read from the server
-
-const int weatherDayUpdateTime = 900000; //time in ms
-const int timeUpdateTime = 60000; //time in ms
-const int screensaverChangeTime = 60000; // 10mins
-const int screensaverOnTime = 15000; // 15 seconds
-
-//hardware stuff
-HardwareSerial nexSerial(2);
-
-//global variables
-long int weatherDayLastUpdate = 0;
-long int timeNewUpdate = 0;
-String timeTmp = "0";
-long int screensaverNewTime = 0;
-Timezone myTZ(myDST, mySTD);
-
+"-----END CERTIFICATE-----\n"; //SSL certificat for forecast api
 void setup() {
 	// intialise nextion display
 	initDisplay();
@@ -102,7 +101,7 @@ void loop() {
 	updateTime(1);
 	getWeather();
 	//change to a screensaver every X mins to avoid display burn in
-	//screensaver();
+	screensaver();
 #ifdef DEBUG
 	delay(500);
 #endif
@@ -116,9 +115,6 @@ void initTime() {
 void initDisplay() {
 	nexSerial.begin(115200, SERIAL_8N1, 19, 22);
 	endNextionCommand();
-	//set baud rate for Nextion display
-	//nexSerial.print("bauds=115200");
-	//endNextionCommand();
 		//set display to send to feedback
 	nexSerial.print(F("bkcmd=0"));
 	endNextionCommand();
@@ -148,17 +144,20 @@ String doubleDigit(int number) {
 }
 
 void screensaver() {
-	if (millis() > screensaverNewTime && screensaverNewTime != 0) {
-		setDisplay(3);
-		Serial.println(1);
+	//display screensaver
+	if ((millis() > screensaverNewTime) && (screensaverNewTime != 0)) {
+		setDisplay(3); //todo more pages with pictures
+		screensaverNewTime = millis() + screensaverChangeTime * 1000;
+		returnToWeatherMainNewTime = millis() + timeoutToWeatherMainDisplay * 1000;
 	}
 	else if (screensaverNewTime == 0) {
-		screensaverNewTime = millis() + screensaverChangeTime;
-		Serial.println(2);
+		screensaverNewTime = millis() + screensaverChangeTime * 1000;
+		returnToWeatherMainNewTime = millis() + timeoutToWeatherMainDisplay * 1000;
 	}
-	else if (millis() > screensaverOnTime + screensaverNewTime - screensaverChangeTime) {
+	//display main weather page
+	if (millis() > returnToWeatherMainNewTime) {
 		setDisplay(1);
-		Serial.println(3);
+		returnToWeatherMainNewTime = millis() + timeoutToWeatherMainDisplay * 1000;	
 	}
 }
 
@@ -180,7 +179,7 @@ void updateTime(int type){
 		tmp = monthStr(month());
 		timeDate += tmp.substring(0, 3); //show three letter month, e.g. Apr.
 		sendToLCD(1, 1, "time", timeDate);
-		timeNewUpdate = millis() + timeUpdateTime; // next update time
+		timeNewUpdate = millis() + 60000; // next update time
 		}
 	}
 	else if (type == 2) {
@@ -294,9 +293,13 @@ void getWeather(){
 	if (millis() >= weatherDayLastUpdate ) {
 		getWeatherCurrent();
 		getWeatherDataRain();
-		getWeatherDataForecast();
 		setDisplay(1);
-		weatherDayLastUpdate = millis() + weatherDayUpdateTime; // next update time
+		weatherDayLastUpdate = millis() + weatherCurrentUpdateTime * 60 * 60 * 1000; // next update time
+	}
+	if (millis() >= weatherForecastLastUpdate) {
+		getWeatherDataForecast();
+		weatherForecastLastUpdate = millis() + weatherForecastUpdateTime * 60 * 60 * 1000; // next update time
+		setDisplay(1);
 	}
 }
 
@@ -341,12 +344,16 @@ void getWeatherCurrent(){
 			int tmp7 = root["currently"]["ozone"]; //ozone
 			String timezone = root["timezone"];; //location
 
-			//temperature (feels like)
-			tmp = "(";
-			tmp += round(tmp9);
-			tmp += ")";
-			sendToLCD(1, 1, F("dayFeelsLike"), tmp);
-
+			//temperature (feels like). Only display if different from current temperature
+			if (round(tmp9) != round(tmp1))	{
+				tmp = "(";
+				tmp += round(tmp9);
+				tmp += ")";
+				sendToLCD(1, 1, F("dayFeelsLike"), tmp);
+			}
+			else {
+				sendToLCD(1, 1, F("dayFeelsLike"), "");
+			}
 			//location
 			sendToLCD(2, 1, F("location"), String(timezone));
 
@@ -366,13 +373,12 @@ void getWeatherCurrent(){
 			sendToLCD(1, 1, F("windADir"), tmp);
 
 			//humidity
-			tmp = String(round(tmp2));
+			tmp = String(round(tmp2*100));
 			tmp += " %";
 			sendToLCD(1, 1, F("humidity"), tmp);
 
 			//UV index
 			tmp = String(tmp5);
-			tmp += " %";
 			sendToLCD(1, 1, F("UVindex"), tmp);
 
 			//ozone
