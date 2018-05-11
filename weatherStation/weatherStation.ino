@@ -1,3 +1,4 @@
+
 #include <NTPClient.h>
 #include <HTTPClient.h> // for https communication
 #include <Timezone.h> // https://github.com/JChristensen/Timezone
@@ -6,13 +7,15 @@
 #include <ArduinoJson.h> // https://github.com/bblanchon/ArduinoJson
 #include <WiFiUdp.h> // needed to get time
 #include <HardwareSerial.h> // to communicate with nextion display
+#include <Wire.h>
+#include "Adafruit_BME280.h"
 
 // nextion display sdcard has to be FAT32+2048 cluster
 //set baud rate for Nextion display
 //nexSerial.print("bauds=115200");
 //endNextionCommand();
 //enable code debugging below
-//#define DEBUG //simple debug
+#define DEBUG //simple debug
 //#define DEBUGALL //display json response from forecast api
 
 // Wifi configuration
@@ -22,11 +25,19 @@ const char* wifiHostname = "";
 
 //WiFiServer server(80);
 
+//bme280 configuration
+#define I2C_SDA 0 //SDA pin
+#define I2C_SCL 4 //SDL pin
+#define SEALEVELPRESSURE_HPA (1019.9)
+#define BME280_ADD 0x76 //find using i2cscanner
+Adafruit_BME280 bme(I2C_SDA, I2C_SCL);
+const float indoorTempCorrection = 2.0;
+
 // Time configuration
 const char* ntpServerName = "europe.pool.ntp.org";     //server pool
 const int timeZoneOffset = 60;                   //offset from Greenwich Meridan Time
 TimeChangeRule myDST = { "GMT", Fourth, Sun, Mar, 2, timeZoneOffset };  //UTC+1
-TimeChangeRule mySTD = { "DST", Fourth, Sun, Nov, 3, timeZoneOffset+60 };   //UTC +2
+TimeChangeRule mySTD = { "DST", Fourth, Sun, Nov, 3, timeZoneOffset + 60 };   //UTC +2
 
 
 const String apiURL = F("https://api.darksky.net/forecast/"); //url to forecast api
@@ -36,12 +47,13 @@ const String unit = F("si"); //unit returned by forecast api
 
 const int weatherCurrentUpdateTime = 30; //time in mins
 const int weatherForecastUpdateTime = 180; //time in mins
-const int screensaverChangeTime = 60; //change time in seconds
+const int screensaverChangeTime = 600; //change time in seconds
 const int timeoutToWeatherMainDisplay = 15; //timeout in seconds to return to main weather display if page is changed manually or screensaver is on
 
-//global variables
+											//global variables
 long int weatherDayLastUpdate = 0;
 long int weatherForecastLastUpdate = 0;
+long int sensorLastUpdate = 0;
 long int returnToWeatherMainNewTime = 0;
 long int timeNewUpdate = 0;
 String timeTmp = "0";
@@ -89,16 +101,20 @@ const char* ca_cert = \
 void setup() {
 	// intialise nextion display
 	initDisplay();
-	
+
 	// intialise wifi
 	connectToWifi();
 
 	// get time from NTP server and update local time
 	initTime();
+
+	//init sensor
+	initBME280();
 }
 
 void loop() {
 	updateTime(1);
+	getSensorData();
 	getWeather();
 	//change to a screensaver every X mins to avoid display burn in
 	screensaver();
@@ -107,24 +123,65 @@ void loop() {
 #endif
 }
 
+void initBME280() {
+	bool status;
+	status = bme.begin(BME280_ADD);
+#ifdef DEBUG
+	if (!status) {
+		Serial.println("Could not find a valid BME280 sensor, check wiring!");
+	}
+#endif // DEBUG
+}
+
+void getSensorData() {
+	if (millis() > sensorLastUpdate + 15000) {
+		String tmp;
+
+		//temperature
+		float indoorTemp = bme.readTemperature();
+		Serial.println(indoorTemp);
+		indoorTemp = indoorTemp - indoorTempCorrection;
+		Serial.println(indoorTemp);
+		indoorTemp = indoorTemp * 10;
+		Serial.println(indoorTemp);
+		indoorTemp = round(indoorTemp);
+		Serial.println(indoorTemp);
+		indoorTemp = indoorTemp / 10;
+		Serial.println(indoorTemp);
+		tmp = String(indoorTemp);
+		Serial.println(tmp);
+		tmp += F(" C");
+		Serial.println(tmp);
+		sendToLCD(1, 1, F("indoorT"), tmp);
+
+		//humidity
+		tmp = String(round(bme.readHumidity()));
+		tmp += F(" %");
+		sendToLCD(1, 1, F("indoorH"), tmp);
+		sensorLastUpdate = millis();
+	}
+
+}
+
 void initTime() {
 	clockUDP.begin(localPort);
 	getTimeFromServer();
 }
 
 void initDisplay() {
+	delay(5000); //wait for display to turn on
 	nexSerial.begin(115200, SERIAL_8N1, 19, 22);
 	endNextionCommand();
-		//set display to send to feedback
+	//set display to send to feedback
 	nexSerial.print(F("bkcmd=0"));
 	endNextionCommand();
-		//lower light //todo: add sensor
-	nexSerial.print(F("dim=50"));
+	//lower light //todo: add sensor
+	nexSerial.print(F("dim=40"));
 	endNextionCommand();
 	//set display to loading
 	String tmp = F("weather station version ");
 	tmp += version;
-	sendToLCD(0, 1, F("t0"), tmp);
+	sendToLCD(0, 1, F("version"), tmp);
 	setDisplay(0);
 	sendToLCD(2, 1, F("version"), version);
 }
@@ -157,11 +214,11 @@ void screensaver() {
 	//display main weather page
 	if (millis() > returnToWeatherMainNewTime) {
 		setDisplay(1);
-		returnToWeatherMainNewTime = millis() + timeoutToWeatherMainDisplay * 1000;	
+		returnToWeatherMainNewTime = millis() + timeoutToWeatherMainDisplay * 1000;
 	}
 }
 
-void updateTime(int type){
+void updateTime(int type) {
 	// 1 updates time on display
 	// 2 prints time to serial
 	String timeDate;
@@ -170,16 +227,16 @@ void updateTime(int type){
 	timeDate += doubleDigit(minute());
 	if (type == 1) {
 		if (millis() >= timeNewUpdate) {
-		timeDate += ' ';
-		String tmp = dayStr(weekday());
-		timeDate += tmp.substring(0, 3); //show three letter day, e.g. fri.
-		timeDate += ' ';
-		timeDate += String(day());
-		timeDate += ". ";
-		tmp = monthStr(month());
-		timeDate += tmp.substring(0, 3); //show three letter month, e.g. Apr.
-		sendToLCD(1, 1, "time", timeDate);
-		timeNewUpdate = millis() + 60000; // next update time
+			timeDate += ' ';
+			String tmp = dayStr(weekday());
+			timeDate += tmp.substring(0, 3); //show three letter day, e.g. fri.
+			timeDate += ' ';
+			timeDate += String(day());
+			timeDate += ". ";
+			tmp = monthStr(month());
+			timeDate += tmp.substring(0, 3); //show three letter month, e.g. Apr.
+			sendToLCD(1, 1, "time", timeDate);
+			timeNewUpdate = millis() + 60000; // next update time
 		}
 	}
 	else if (type == 2) {
@@ -210,7 +267,7 @@ void connectToWifi() {
 		Serial.print(".");
 #endif	
 	}
-	
+
 #ifdef DEBUG
 	Serial.print("connected");
 	Serial.println();
@@ -235,7 +292,7 @@ void getTimeFromServer() {
 
 	while (i < timeServerPasses && !connectStatus) {
 #ifdef DEBUG
-	Serial.print(".");
+		Serial.print(".");
 #endif
 		WiFi.hostByName(ntpServerName, timeServerIP);
 		sendNTPpacket(timeServerIP);
@@ -247,7 +304,7 @@ void getTimeFromServer() {
 
 	if (connectStatus) {
 #ifdef DEBUG
-	Serial.println("connected");
+		Serial.println("connected");
 #endif
 		timeServerConnected = true;
 		clockUDP.read(packetBuffer, 48);
@@ -256,7 +313,7 @@ void getTimeFromServer() {
 		unsigned long highWord = word(packetBuffer[40], packetBuffer[41]);
 		unsigned long lowWord = word(packetBuffer[42], packetBuffer[43]);
 		// the timestamp is in seconds from 1900, add 70 years to get Unixtime
-		unixTime = (highWord << 16 | lowWord) - 2208988800 + timeZoneOffset*60;
+		unixTime = (highWord << 16 | lowWord) - 2208988800 + timeZoneOffset * 60;
 		unixTime = myTZ.toLocal(unixTime);
 		setTime(unixTime);
 #ifdef DEBUG
@@ -289,21 +346,23 @@ void setDisplay(int pageNumber) {
 	endNextionCommand();
 }
 
-void getWeather(){
-	if (millis() >= weatherDayLastUpdate ) {
+void getWeather() {
+	if (millis() >= weatherDayLastUpdate) {
 		getWeatherCurrent();
 		getWeatherDataRain();
 		setDisplay(1);
-		weatherDayLastUpdate = millis() + weatherCurrentUpdateTime * 60 * 60 * 1000; // next update time
+		weatherDayLastUpdate = millis() + weatherCurrentUpdateTime * 60 * 1000; // next update time
+		delay(100);
 	}
 	if (millis() >= weatherForecastLastUpdate) {
 		getWeatherDataForecast();
-		weatherForecastLastUpdate = millis() + weatherForecastUpdateTime * 60 * 60 * 1000; // next update time
+		weatherForecastLastUpdate = millis() + weatherForecastUpdateTime * 60 * 1000; // next update time
 		setDisplay(1);
+		delay(100);
 	}
 }
 
-void getWeatherCurrent(){
+void getWeatherCurrent() {
 	String result;
 	String tmp;
 	if ((WiFi.status() == WL_CONNECTED)) {
@@ -344,8 +403,8 @@ void getWeatherCurrent(){
 			int tmp7 = root["currently"]["ozone"]; //ozone
 			String timezone = root["timezone"];; //location
 
-			//temperature (feels like). Only display if different from current temperature
-			if (round(tmp9) != round(tmp1))	{
+												 //temperature (feels like). Only display if different from current temperature
+			if (round(tmp9) != round(tmp1)) {
 				tmp = "(";
 				tmp += round(tmp9);
 				tmp += ")";
@@ -363,17 +422,23 @@ void getWeatherCurrent(){
 			//temperature
 			sendToLCD(1, 1, F("dayCurrent"), String(round(tmp1)));
 
-			//wind and direction
-			tmp = String(round(tmp4));
-			tmp += "(";
-			tmp += String(round(tmp8));
-			tmp += ")";
+			//wind and direction Only display windGust if different from windSpeed
+			if (round(tmp4) != round(tmp8)) {
+				tmp = String(round(tmp4));
+				tmp += "(";
+				tmp += String(round(tmp8));
+				tmp += ")";
+			}
+			else {
+				tmp = String(round(tmp4));
+
+			}
 			tmp += "m/s - ";
 			tmp += getShortWindDirection(tmp6);
 			sendToLCD(1, 1, F("windADir"), tmp);
 
 			//humidity
-			tmp = String(round(tmp2*100));
+			tmp = String(round(tmp2 * 100));
 			tmp += " %";
 			sendToLCD(1, 1, F("humidity"), tmp);
 
@@ -463,8 +528,16 @@ void getWeatherDataRain() {
 			JsonObject& hourly_data5 = hourly_data[5];
 			float hourly_data5_precipIntensity = hourly_data5["precipIntensity"];
 			precipAccumulation = precipAccumulation + hourly_data5_precipIntensity;
-			tmp += round(precipAccumulation);
-			tmp += F(" mm");
+
+			//only display rain amount if anything is expected
+			if (round(precipAccumulation) != 0) {
+				tmp = "Rain ";
+				tmp += round(precipAccumulation);
+				tmp += F(" mm");
+			}
+			else {
+				tmp = "";
+			}
 			sendToLCD(1, 1, F("precipitation"), tmp);
 
 			//last update time
@@ -524,7 +597,7 @@ void getWeatherDataForecast() {
 			JsonObject& daily_data1 = daily_data[1];
 			JsonObject& daily_data2 = daily_data[2];
 			JsonObject& daily_data3 = daily_data[3];
-			
+
 			//day0
 			float daily_data0_moonPhase = daily_data0["moonPhase"]; //moon phase
 			int moonPicture = getMoonPicture(daily_data0_moonPhase);
@@ -552,7 +625,7 @@ void getWeatherDataForecast() {
 
 			tmp2 = daily_data0["temperatureHigh"];
 			sendToLCD(1, 1, "day0high", String(round(tmp2)));
-			tmp2 = daily_data0["temperatureLow"]; 
+			tmp2 = daily_data0["temperatureLow"];
 			sendToLCD(1, 1, "day0low", String(round(tmp2)));
 
 			// day1
@@ -564,7 +637,7 @@ void getWeatherDataForecast() {
 			tmp = String(tmp.substring(0, 3));
 			sendToLCD(1, 1, F("day1name"), tmp);
 			String tmp4 = daily_data1["icon"];
-			sendToLCD(1, 3, F("day1"), String(getWeatherPicture(tmp4,2)));
+			sendToLCD(1, 3, F("day1"), String(getWeatherPicture(tmp4, 2)));
 			tmp2 = daily_data1["temperatureHigh"];
 			sendToLCD(1, 1, F("day1high"), String(round(tmp2)));
 			tmp2 = daily_data1["temperatureLow"];
@@ -579,7 +652,7 @@ void getWeatherDataForecast() {
 			tmp = String(tmp.substring(0, 3));
 			sendToLCD(1, 1, F("day2name"), tmp);
 			String tmp5 = daily_data2["icon"];
-			sendToLCD(1, 3, F("day2"), String(getWeatherPicture(tmp5,2)));
+			sendToLCD(1, 3, F("day2"), String(getWeatherPicture(tmp5, 2)));
 			tmp2 = daily_data2["temperatureHigh"];
 			sendToLCD(1, 1, F("day2high"), String(round(tmp2)));
 			tmp2 = daily_data2["temperatureLow"];
@@ -594,7 +667,7 @@ void getWeatherDataForecast() {
 			tmp = String(tmp.substring(0, 3));
 			sendToLCD(1, 1, F("day3name"), tmp);
 			String tmp6 = daily_data3["icon"];
-			sendToLCD(1, 3, F("day3"), String(getWeatherPicture(tmp6,2)));
+			sendToLCD(1, 3, F("day3"), String(getWeatherPicture(tmp6, 2)));
 			tmp2 = daily_data3["temperatureHigh"];
 			sendToLCD(1, 1, F("day3high"), String(round(tmp2)));
 			tmp2 = daily_data3["temperatureLow"];
@@ -710,7 +783,7 @@ int getWeatherPicture(String icon, int size) {
 	// size = 1, 128x128
 	// size = 2, 64x64
 	if (size == 1) {
-		if (icon == F("clear - day")) {
+		if (icon == F("clear-day")) {
 			return 81;
 		}
 		else if (icon == F("clear-night")) {
@@ -832,20 +905,129 @@ void sendToLCD(uint8_t page, uint8_t type, String index, String cmd) {
 #endif
 }
 
+
+
+
+//int getWeatherPicture2(int precipProbability, String precipType, int cloudCover, int windSpeed, int pictureSize) {
+//	if (cloudCover * 100 <= 20) {
+//		//sunny
+//		if (precipProbability * 100 >= 50) {
+//			if (precipType == "rain") {
+//				if (windSpeed < 10) {
+//					// no wind symbol
+//				}
+//				if (windSpeed >= 10 && windSpeed < 18) {
+//					// small wind symbol
+//				}
+//				if (windSpeed > 18) {
+//					// large wind symbol
+//				}
+//			}
+//			else if (precipType == "snow") {
+//				if (windSpeed < 10) {
+//					// no wind symbol
+//				}
+//				if (windSpeed >= 10 && windSpeed < 18) {
+//					// small wind symbol
+//				}
+//				if (windSpeed > 18) {
+//					// large wind symbol
+//				}
+//			}
+//			else if (precipType == "sleet") {
+//				if (windSpeed < 10) {
+//					// no wind symbol
+//				}
+//				if (windSpeed >= 10 && windSpeed < 18) {
+//					// small wind symbol
+//				}
+//				if (windSpeed > 18) {
+//					// large wind symbol
+//				}
+//			}
+//			else { // sunny
+//				if (windSpeed < 10) {
+//					// no wind symbol
+//				}
+//				if (windSpeed >= 10 && windSpeed < 18) {
+//					// small wind symbol
+//				}
+//				if (windSpeed > 18) {
+//					// large wind symbol
+//				}
+//			}
+//		}
+//		else if (precipProbability * 100 < 50) {
+//			if (precipType == "rain") {
+//				if (windSpeed < 10) {
+//					// no wind symbol
+//				}
+//				if (windSpeed >= 10 && windSpeed < 18) {
+//					// small wind symbol
+//				}
+//				if (windSpeed > 18) {
+//					// large wind symbol
+//				}
+//			}
+//			else if (precipType == "snow") {
+//				if (windSpeed < 10) {
+//					// no wind symbol
+//				}
+//				if (windSpeed >= 10 && windSpeed < 18) {
+//					// small wind symbol
+//				}
+//				if (windSpeed > 18) {
+//					// large wind symbol
+//				}
+//			}
+//			else if (precipType == "sleet") {
+//				if (windSpeed < 10) {
+//					// no wind symbol
+//				}
+//				if (windSpeed >= 10 && windSpeed < 18) {
+//					// small wind symbol
+//				}
+//				if (windSpeed > 18) {
+//					// large wind symbol
+//				}
+//			}
+//			else { // sunny
+//				if (windSpeed < 10) {
+//					// no wind symbol
+//				}
+//				if (windSpeed >= 10 && windSpeed < 18) {
+//					// small wind symbol
+//				}
+//				if (windSpeed > 18) {
+//					// large wind symbol
+//				}
+//			}
+//		}
+//	}
+//	else if (cloudCover * 100 > 20 && cloudCover * 100 <= 40) {
+//
+//	}
+//	else if (cloudCover * 100 > 40 && cloudCover * 100 <= 80) {
+//
+//	}
+//	else if (cloudCover * 100 > 80) {
+//	}
+//}
+
 #ifdef DEBUG
-	void currentTime() {
-		Serial.print(": ");
-		Serial.print(hour());
-		Serial.print(":");
-		Serial.print(minute());
-		Serial.print(":");
-		Serial.print(second());
-		Serial.print(" ");
-		Serial.print(day());
-		Serial.print("-");
-		Serial.print(month());
-		Serial.print("-");
-		Serial.print(year());
-		Serial.println();
-	}
+void currentTime() {
+	Serial.print(": ");
+	Serial.print(hour());
+	Serial.print(":");
+	Serial.print(minute());
+	Serial.print(":");
+	Serial.print(second());
+	Serial.print(" ");
+	Serial.print(day());
+	Serial.print("-");
+	Serial.print(month());
+	Serial.print("-");
+	Serial.print(year());
+	Serial.println();
+}
 #endif
