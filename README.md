@@ -1,4 +1,4 @@
-# Varios Arduino applications
+# Various Arduino applications
 A small collection of my personal utilities
 
 If you find these helpful, a small donation is appreciated, [![Donate](https://www.paypalobjects.com/en_US/i/btn/btn_donate_LG.gif)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=K8XPMSEBERH3W).
