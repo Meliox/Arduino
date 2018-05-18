@@ -1,392 +1,322 @@
-#include <SPI.h>
-#include <U8g2lib.h>
+#include <ESPAsyncWebServer.h>
+#include <AsyncJson.h>
+#include <AsyncTCP.h>
+#include <FS.h>
+#include <ArduinoJson.h>
+#include <WiFi.h>
+#include <NTPClient.h>
+#include <Timezone.h> // https://github.com/JChristensen/Timezone
 
-/* Constructor */;
-U8G2_SSD1306_128X32_UNIVISION_1_HW_I2C display(U8G2_R0, SCL, SDA, U8X8_PIN_NONE);
+#define DEBUG
 
-#define CH_PD 7 // digital pin for resetting esp8266
+const String W_VERSION = F("1.0");
+const String NAME = F("Water watering system");
 
 // Wifi configuration
-#define SSID ""
-#define PASSWORD ""
-#define HOSTNAME ""
-#define WEBSERVERPORT "80"
-//change baud rate AT+UART_DEF=115200,8,1,0,0
+const char* SSID = "";
+const char* PASSWORD = "";
+const char* WIFI_HOSTNAME = "";
+
+// Time configuration
+const char* ntpServerName = "europe.pool.ntp.org";     //server pool
+const int timeZoneOffset = 1;                   //offset from Greenwich Meridan Time
+TimeChangeRule myDST = { "GMT", Fourth, Sun, Mar, 2, timeZoneOffset * 60 };  //UTC+1
+TimeChangeRule mySTD = { "DST", Fourth, Sun, Nov, 3, timeZoneOffset * 60 + 60 };   //UTC +2
+
+AsyncWebServer server(80);
+WiFiUDP clockUDP;                               // initialize a UDP instance
+unsigned int LOCAL_PORT = 2390;                 // local port to listen for UDP packets
+IPAddress timeServerIP;                         // IP address of random server 
+byte packetBuffer[48];                          // buffer to hold incoming and outgoing packets
+int TIME_SERVER_DELAY = 1000;                   // delay for the time server to reply
+int TIME_SERVER_PASSES = 4;                     // number of tries to connect to the time server before timing out
+boolean TIME_SERVER_CONNECTED = false;          // is set to true when the time is read from the server
+Timezone myTZ(myDST, mySTD);
+
+
+int sensorUpdateTime = 10; //in mins
+int minPumpInterval = 10; //in mins
 
 // enable and disbale pumps and connected sensors
 // pump is [i][0], while any associated sensor is the next [0][i], e.g. 4 sensors possible per pump
-int sys[5][5] = {
-  {2, 0, -1, -1, -1} ,
-  { -1, -1, -1, -1, -1} ,
-  { -1, -1, -1, -1, -1} ,
-  { -1, -1, -1, -1, -1} ,
-  { -1, -1, -1, -1, -1} ,
+//disabled(0=false, 1=true), pump pin, pumptime (seconds), last pump time, sensor pin, last sensor value, last sensor read, pump water below
+int numberOfPumps = 2;
+long int sys[2][8] = {
+	{0, 32, 2, 0, 34, 3600, 0, 2500},
+	{0, 33, 2, 0, 35, 1200, 0, 2500},
 };
-// limit
-#define PUMPTIME "2000"
-#define SENSORLIMIT "350"
-#define CHECKINTERVAL "900000" // how often to check the sensors for each pump
 
-// CODE BELOW
-///////////////////////////////////////////////////////////////////////////////////////
-int i;
-int k;
-int j;
-int webparsedresponse[3];
-const byte numChars = 32;
-char receivedChars[numChars];   // an array to store the received data
-char serialmessage[32];
-boolean newData = false;
-int arrInfo[5];
-long int lastupdate[5] = { -1, -1, -1, -1, -1};
-long int lastdisplayupdate;
-String webpage;
-String displaytext;
-boolean lcdon = false;
-short int lcdloop = 0;
+//code
+long int timeNewUpdate = 0;
 
 ////////////////////////////////////////////////////////////////////////////////////////
-void setup(void) {
-  // initialise all connected parts
-  // turn off all pumpts
-  pumpoff();
-  // start display
-  display.begin();
-  writetodisplay(F("Initialising wifi"));
-  Serial.begin(115200);
-  reset8266();
-  InitWifiModule(); // Iniciate module as WebServer
-  writetodisplay(F("Done"));
-  delay(1000);
-  display.clear();
+void setup() {
+	// turn off all pumps
+	initPump();
+
+	// intialise wifi
+	connectToWifi();
+
+	// get time from NTP server and update local time
+	initTime();
+	
+	//return json webreply
+	webReplyJson(); 
+
+	//return html webpage webreply
+	server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+		int params = request->params();
+		if (request->hasParam("pump")) { //evaluate return parameters
+			AsyncWebParameter* p = request->getParam("pump");
+			pumpWater(atoi(p->value().c_str()));
+		}
+		char tmp[1000];
+		webreplyHTML().toCharArray(tmp,1000);
+		request->send_P(200, "text/html", tmp); //return html page
+	});
+
+	server.begin();
 }
 
-/* draw something on the display with the `firstPage()`/`nextPage()` loop*/
-void loop(void) {
-  check8266(); // check webserver and respond
-  updatedisplay(); // update display information
-  checksensors(); // check sensors and pump water is deemed necessary
+void loop() {
+	//read soil sensor
+	readSensor();
+	//pump water when needed
+	//evaluateDryness();
+	delay(5000);
 }
 
-void updatedisplay() {
-  // limit updating of the display
-  if (lcdon) {
-    if (millis() >= (lastdisplayupdate + 10000)) {
-      // only display information for enabled pumps
-      while (sys[lcdloop][0] < 0) {
-        ++lcdloop;
-        // reset loop
-        if (lcdloop = 4 ) {
-          lcdloop = 0;
-        }
-      }
-      // Assembly display message
-      displaytext = F("P: ");
-      displaytext += lcdloop;
-      displaytext += F(" ");
-      getsenorinfo(lcdloop);
-      for (i = 0 ; i < 4 ; ++i ) {
-        if (arrInfo[i] >= 0) {
-          displaytext += F("S: ");
-          displaytext += lcdloop;
-          displaytext += F(": ");
-          displaytext += arrInfo[i];
-          displaytext += F(",");
-        }
-      }
-      // Print to display
-      writetodisplay(displaytext);
-      // reset loop
-      if (lcdloop >= 4 ) {
-        lcdloop = 0;
-      } else {
-        ++lcdloop;
-      }
-      // clear display text and pause display update
-      displaytext = "";
-      lastdisplayupdate = millis();
-    }
-  }
+void evaluateDryness() {
+	for (int i = 0; i < numberOfPumps; ++i) {
+		if (sys[i][5] < sys[i][7]) {
+			pumpWater(i);
+		}
+	}
 }
 
-void pumpoff() {
-  // turn off all pumps
-  for (i = 0 ; i < 5 ; ++i ) {
-    if (sys[i][0] >= 0) {
-      pinMode(sys[i][0], OUTPUT);
-      digitalWrite(sys[i][0], LOW);
-    }
-  }
+void readSensor() {
+	for (int i = 0; i < numberOfPumps; ++i) {
+		if (now() >= sys[i][6] + sensorUpdateTime * 60 * 1000 ) {
+			if (sys[i][0] == 0) {
+				sys[i][5] = analogRead(sys[i][4]); //read sensor value
+				sys[i][6] = now(); //update last read time
+				delay(50);
+			}
+		}
+	}
 }
 
-void check8266() {
-  if (Serial.available()) {
-    // check if 8266 is sending data
-    if (Serial.find("+IPD,")) {
-      // look for an reponse
-      Serial.println("reading");
-      read8266();
-      parseresponse8266();
-      reply8266();
-    }
-  }
+void initPump() {
+	for (int i = 0; i < numberOfPumps; ++i) {
+		if (sys[i][0] == 0) {
+			pinMode(sys[i][1], OUTPUT); //enable pin for pump
+			digitalWrite(sys[i][1], LOW); //disable pin
+		}
+	}
 }
 
-void checksensors() {
-  // loop through all anabled pumps and sensors
-  for (i = 0 ; i < 5 ; ++i ) {
-    // only enabled pumps
-    if (sys[i][0] >= 0 && millis() > lastupdate[i] + CHECKINTERVAL )
-    {
-      // loop through all sensors
-      for (j = 1 ; i < 4 ; ++i ) {
-        //only enabled sensors
-        if (sys[i][j] >= 0)
-        {
-          // if sensor is above limit, we need to pump water
-          if (analogRead(sys[i][j]) > SENSORLIMIT ) {
-            // pump water
-            pumpwater(sys[i]);
-            // exit loop so water can settle for pump and sensors, go to next pump
-            break;
-          }
-          // update last check interval
-          lastupdate[i] = millis();
-        }
-      }
-    }
-  }
+String webreplyHTML() {
+	String tmp;
+	tmp = F("<html>");
+	tmp += F("<style>table, th, td { border: 1px solid black; border-collapse: collapse; }</style>");
+	tmp += F("<body>");
+	tmp += F("<h1>Automatic water pumping system</h1>");
+	tmp += F("<table style=\"width:100 %\">");
+	tmp += F("<tr>");
+	tmp += F("<th>Pump no.</th>");
+	tmp += F("<th>Pumping time (s)</th>");
+	tmp += F("<th>Last pump time</th>");
+	tmp += F("<th>Moisture lvl.</th>");
+	tmp += F("<th>Last reading</th>");
+	tmp += F("<th>Pump</th>");
+	tmp += F("</tr>");
+	for (int i = 0; i < numberOfPumps; ++i) {
+		tmp += F("<tr>");
+		tmp += F("<td>");
+		tmp += i;
+		tmp += F("</td>");
+		tmp += F("<td>");
+		tmp += sys[i][2];
+		tmp += F("</td>");
+		tmp += F("<td>");
+		tmp += displayTime(sys[i][3]);
+		tmp += F("</td>");
+		tmp += F("<td>");
+		tmp += getDrynessScale(sys[i][5]);
+		tmp += F("</td>");
+		tmp += F("<td>");
+		tmp += displayTime(sys[i][6]);
+		tmp += F("</td>");
+		tmp += F("<td>");
+		tmp += "<form action = \"/\"><button type=\"submit\" name=\"pump\" value=\"";
+		tmp += i;
+		tmp += "\">ON</button></form>";
+		tmp += F("</td>");
+		tmp += F("</tr>");
+	}
+	tmp += F("</table>");
+	tmp += F("</body>");
+	tmp += F("</html>");
+	return tmp;
 }
 
-void pumpwater(int i) {
-  // turn on pump for a given time
-  digitalWrite(i, HIGH);
-  delay(PUMPTIME);
-  digitalWrite(i, LOW);
+String getDrynessScale(int t) {
+	if (t >= 3500) {
+		return "very dry";
+	}
+	else if (t < 3500 && t > 2500) {
+		return "dry";
+	}
+	else if (t < 2500 && t > 1500) {
+		return "moist";
+	}
+	else if (t < 1500) {
+		return "wet";
+	}
 }
 
-void parseresponse8266() {
-  // possible reponses from esp8266
-  // receivedChars="0,424:GET /?pin=2&on=65 HTTP/1.";
-  // receivedChars="0,424:GET /?pin=sd HTTP/1.1";
-  // receivedChars="0,424:GET HTTP/1.1 xxxxxxxxxxxxxxxx";
-  strcpy(serialmessage, receivedChars);
-  // get connection id
-  webparsedresponse[0] = parser(serialmessage, 0);
-  // parse pin if present
-  strcpy(serialmessage, receivedChars);
-  if (strstr(serialmessage, "pin")) { // todo: broken
-    webparsedresponse[1] = parser(serialmessage, 3);
-  } else {
-    webparsedresponse[1] = -1;
-  }
-  strcpy(serialmessage, receivedChars);
-  // parse enable if present
-  if (strstr(serialmessage, "on")) {
-    webparsedresponse[2] = 1;
-  } else {
-    webparsedresponse[2] = -1;
-  }
-  // parse lcd if present
-  strcpy(serialmessage, receivedChars);
-  if (strstr(serialmessage, "lcd")) {
-    if (lcdon) {
-      lcdon = false;
-    } else {
-      lcdon = true;
-    }
-  }
-  //reset data
-  serialmessage[32];
-  receivedChars[32];
-  newData = false;
+void webReplyJson() {
+	server.on("/json", HTTP_GET, [](AsyncWebServerRequest *request) {
+		AsyncResponseStream *reply = request->beginResponseStream("text/json");
+		StaticJsonBuffer<1000> JSONbuffer;
+		JsonObject& root = JSONbuffer.createObject();
+		JsonObject& response = root.createNestedObject("response");
+		response["name"] = NAME;
+		response["version"] = W_VERSION;
+		response["time"] = now();
+		JsonObject& sensor = root.createNestedObject("sensor");
+		for (int i = 0; i < numberOfPumps; ++i) {
+			JsonObject& sensorNumber = sensor.createNestedObject(String(i));
+			sensorNumber[F("Pumping time")] = sys[i][2];
+			sensorNumber[F("Last pump time")] = sys[i][3];
+			sensorNumber[F("Moisture lvl.")] = getDrynessScale(sys[i][5]);
+			sensorNumber[F("Last reading time")] = sys[i][6];
+		}
+		root.printTo(*reply);
+		request->send(reply);
+	});
 }
 
-int parser(char arr[], int i) {
-  // parse int from esp8266 response
-  char * strtokIndx;
-  strtokIndx = strtok(arr, ", =&");
-  int arr2[8];
-  j = 0;
-  while ((strtokIndx != NULL)) {
-    arr2[j] = atoi(strtokIndx);
-    strtokIndx = strtok(NULL, ", =&");
-    ++j;
-  }
-  return arr2[i];
+String displayTime(time_t t) {
+	String timeTmp;
+	timeTmp += doubleDigit(hour(t));
+	timeTmp += ':';
+	timeTmp += doubleDigit(minute(t));
+	timeTmp += ':';
+	timeTmp += doubleDigit(second(t));
+	timeTmp += " - ";
+	timeTmp += doubleDigit(day(t));
+	timeTmp += '/';
+	timeTmp += doubleDigit(month(t));
+	timeTmp += '/';
+	timeTmp += year(t);
+	return timeTmp;
 }
 
-void reply8266() {
-  // parse reply from esp8266 and return a response based on reply
-  webpage = F("<h1>Water sys</h1><h2>");
-  if (webparsedresponse[1] >= 0 && webparsedresponse[2] == 1 ) {
-    // selected pump must be turned on
-    pumpwater(webparsedresponse[1]);
-    webpage += F("Pump ");
-    webpage += webparsedresponse[1];
-    webpage += F(" is turned on.");
-    webpage += F("</h2>");
-  }
-  else if (webparsedresponse[1] >= 0 ) {
-    // return info on sensors for selected pump
-    webpage += F("Pump: ");
-    webpage += webparsedresponse[1];
-    getsenorinfo(webparsedresponse[1]);
-    webpage += F("<br>");
-    for (i = 0 ; i < 4 ; ++i ) {
-      if (arrInfo[i] >= 0) {
-        webpage += F("Sensor: ");
-        webpage += i;
-        webpage += F(",");
-        webpage += arrInfo[i];
-        webpage += F("<br>");
-      }
-    }
-    webpage += F("</h2>");
-  }
-  else {
-    // main page
-    webpage += F("<form action=""/"">");
-    webpage += F("Pump selc:<br>");
-    webpage += F("<input type=""text"" name=""pin"" value=""><br>");
-    webpage += F("Water:<input type="" checkbox"" name=""on"" value=""1""><br>");
-    webpage += F("<input type=""submit"" value=""Submit"">");
-    webpage += F("</form>");
-    webpage += F("Display:");
-    if (lcdon) {
-      webpage += F("on");
-    } else {
-      webpage += F("off");
-    }
-    webpage += F("<br>");
-    webpage += F("<form action=""/"">");
-    webpage += F("<input type=""hidden"" name=""lcd"" value=""1"">");
-    webpage += F("<input type=""submit"" value=""ON/OFF""/>");
-    webpage += F("</form>");
-    webpage += F("</h2>");
-  }
-  String cipSend = F("AT+CIPSEND=");
-  cipSend += webparsedresponse[0];
-  cipSend += ",";
-  cipSend += webpage.length();
-  sendData(cipSend, 1000);
-  sendData(webpage, 1000);
-  delay(200);
-  String closeCommand = F("AT+CIPCLOSE=");
-  closeCommand += webparsedresponse[0]; // append connection id
-  sendData(closeCommand, 1000);
-  //reset webparsedresponse
-  webparsedresponse[3];
-  //reset info array
-  arrInfo[5];
-  //clear webpage
-  webpage = "";
-}
-void getsenorinfo(int i) {
-  // get info from all enabled sensors for pump i
-  for (j = 1 ; j < 5 ; ++j ) {
-    if (sys[i][j] >= 0 ) {
-      arrInfo[j - 1] = analogRead(sys[i][j]);
-    } else {
-      arrInfo[j - 1] = -1;
-    }
-  }
+void pumpWater(int p) {
+	digitalWrite(p, HIGH);
+	delay(sys[p][2] * 1000); //pump time
+	digitalWrite(p, LOW);
+	sys[p][3] = now(); //set last pump time
+	Serial.print("pumping: ");
+	Serial.print(p);
 }
 
-void read8266() {
-  // read reply from esp8266 using serial communication
-  static byte ndx = 0;
-  char endMarker = '\n';
-  char rc;
-  while (Serial.available() > 0 && newData == false) {  
-    rc = Serial.read();
-    Serial.println(rc);
-    if (rc != endMarker) {
-      receivedChars[ndx] = rc;
-      ndx++;
-      if (ndx >= numChars) {
-        ndx = numChars - 1;
-      }
-    }
-    else {
-      receivedChars[ndx] = '\0'; // terminate the string
-      ndx = 0;
-      newData = true;
-    }
-  }
-  Serial.println(newData);
-  Serial.print("h: ");
-  for (i = 0; i < 32 ; ++i) {
-    Serial.print(receivedChars[i]);
-  }
-  Serial.println("");
-  // empty buffer
-  emptyserialbuffer();
+void connectToWifi() {
+#ifdef DEBUG
+	Serial.println();
+	Serial.println();
+	Serial.print("Connecting to wifi: ");
+#endif	
+	WiFi.begin(SSID, PASSWORD);
+	WiFi.setHostname(WIFI_HOSTNAME);
+	while (WiFi.status() != WL_CONNECTED) {
+		delay(500);
+#ifdef DEBUG
+		Serial.print(".");
+#endif
+	}
+#ifdef DEBUG
+	Serial.println();
+	Serial.print("IPAddress: ");
+	Serial.println(WiFi.localIP());
+#endif
 }
 
-void reset8266 () {
-  // Pin CH_PD needs a reset before start communication
-  pinMode(CH_PD, OUTPUT);
-  digitalWrite(CH_PD, LOW);
-  delay(300);
-  digitalWrite(CH_PD, HIGH);
+void initTime() {
+	clockUDP.begin(LOCAL_PORT);
+	getTimeFromServer();
 }
 
-void writetodisplay(String t) {
-  // display only handles 50 char at a time in two lines
-  if (t.length() < 50 ) {
-    display.firstPage();
-    do {
-      display.setFont(u8g2_font_ncenB08_tr);
-      if ( t.length() > 25 ) {
-        display.setCursor(0, 10);
-        display.print(t.substring(1, 25));
-        display.setCursor(0, 25);
-        display.print(t.substring(26, 50));
-      } else {
-        display.setCursor(0, 10);
-        display.print(t);
-      }
-    } while ( display.nextPage() ); //todo: fix to write two lines
-  } else {
-    display.firstPage();
-    do {
-      display.setFont(u8g2_font_ncenB08_tr);
-      display.setCursor(0, 10);
-      display.print(F("error"));
-    } while ( display.nextPage() );
-  }
+void getTimeFromServer() {
+#ifdef DEBUG
+	Serial.print("Getting time from server:");
+#endif
+
+	int connectStatus = 0, i = 0;
+	unsigned long unixTime;
+
+	while (i < TIME_SERVER_PASSES && !connectStatus) {
+#ifdef DEBUG
+		Serial.print(".");
+#endif
+		WiFi.hostByName(ntpServerName, timeServerIP);
+		sendNTPpacket(timeServerIP);
+		delay(TIME_SERVER_DELAY / 2);
+		connectStatus = clockUDP.parsePacket();
+		delay(TIME_SERVER_DELAY / 2);
+		i++;
+	}
+
+	if (connectStatus) {
+#ifdef DEBUG
+		Serial.println("connected");
+#endif
+		TIME_SERVER_CONNECTED = true;
+		clockUDP.read(packetBuffer, 48);
+
+		// the timestamp starts at byte 40 of the received packet and is four bytes, or two words, long.
+		unsigned long highWord = word(packetBuffer[40], packetBuffer[41]);
+		unsigned long lowWord = word(packetBuffer[42], packetBuffer[43]);
+		// the timestamp is in seconds from 1900, add 70 years to get Unixtime
+		unixTime = (highWord << 16 | lowWord) - 2208988800 + timeZoneOffset * 60 * 60;
+		unixTime = myTZ.toLocal(unixTime);
+		setTime(unixTime);
+#ifdef DEBUG
+		Serial.print("Time received: ");
+		Serial.print(displayTime(now()));
+		Serial.println("");
+#endif
+	}
 }
 
-void InitWifiModule() {
-  // initialise esp8266
-  sendData(F("AT+RST"), 2000); // reset
-  delay(1000);
-  sendData(F("AT+CWMODE=1"), 1000); // enable connection to wireless
-  delay(1000);
-  sendData(F("AT+CWHOSTNAME=\""HOSTNAME"\""), 1000); // set hostname of esp8266
-  delay(1000);
-  sendData(F("AT+CWJAP_CUR=\""SSID"\",\""PASSWORD"\""), 2000); // login to wifi network
-  delay(5000);
-  sendData(F("AT+CIPMUX=1"), 1000); // Multiple connections (5)
-  delay(1000);
-  sendData(F("AT+CIPSERVER=1,"WEBSERVERPORT""), 1000); // start webserver at port
+unsigned long sendNTPpacket(IPAddress& address) {
+	memset(packetBuffer, 0, 48);
+	packetBuffer[0] = 0b11100011;     // LI, Version, Mode
+	packetBuffer[1] = 0;              // Stratum, or type of clock
+	packetBuffer[2] = 6;              // Polling Interval
+	packetBuffer[3] = 0xEC;           // Peer Clock Precision
+									  // 8 bytes of zero for Root Delay & Root Dispersion
+	packetBuffer[12] = 49;
+	packetBuffer[13] = 0x4E;
+	packetBuffer[14] = 49;
+	packetBuffer[15] = 52;
+
+	clockUDP.beginPacket(address, 123);    //NTP requests are to port 123
+	clockUDP.write(packetBuffer, 48);
+	clockUDP.endPacket();
 }
 
-void emptyserialbuffer() {
-  // empty serial buffer
-  while (Serial.available()) {
-    Serial.read();
-  }
-}
-/*************************************************/
-// Send AT commands to esp8266
-void sendData(String command, const int timeout) {
-  Serial.println(command);
-  // add delay
-  delay(100);
-  long int time = millis();
-  while ( (time + timeout) > millis()) {
-    emptyserialbuffer();
-  }
+String doubleDigit(int number) {
+	// converts a single digit into a double digit number
+	String tmp;
+	if (number < 10) {
+		tmp += "0";
+		tmp += String(number);
+		return tmp;
+	}
+	else {
+		tmp = String(number);
+		return tmp;
+	}
 }
