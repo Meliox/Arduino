@@ -1,11 +1,14 @@
-#include <ESPAsyncWebServer.h>
-#include <AsyncJson.h>
-#include <AsyncTCP.h>
-#include <FS.h>
-#include <ArduinoJson.h>
-#include <WiFi.h>
-#include <NTPClient.h>
+#include <ESPAsyncWebServer.h> //jsonreply
+#include <AsyncJson.h> //jsonreply
+#include <AsyncTCP.h> //jsonreply
+#include <FS.h> //jsonreply
+#include <ArduinoJson.h> //jsonreply
+#include <WiFi.h> //arduino ota, jsonreply, time
+#include <NTPClient.h> //time
 #include <Timezone.h> // https://github.com/JChristensen/Timezone
+#include <ESPmDNS.h> //arduino ota
+#include <WiFiUdp.h> //arduino ota
+#include <ArduinoOTA.h> //arduino ota
 
 #define DEBUG
 
@@ -16,6 +19,11 @@ const String NAME = F("Water watering system");
 const char* SSID = "";
 const char* PASSWORD = "";
 const char* WIFI_HOSTNAME = "";
+
+//Arduino OTA
+const uint16_t arduinoOTAPort = 3232;
+const char* arduinoOTAHostname = "";
+const char* arduinoOTAPasswordHash = "";
 
 // Time configuration
 const char* ntpServerName = "europe.pool.ntp.org";     //server pool
@@ -37,20 +45,24 @@ Timezone myTZ(myDST, mySTD);
 int sensorUpdateTime = 10; //in mins
 int minPumpInterval = 10; //in mins
 
+
 // enable and disbale pumps and connected sensors
 // pump is [i][0], while any associated sensor is the next [0][i], e.g. 4 sensors possible per pump
-//disabled(0=false, 1=true), pump pin, pumptime (seconds), last pump time, sensor pin, last sensor value, last sensor read, pump water below
+//disabled(1=disabled 0=enabled, pump pin, pumptime (seconds), last pump time, sensor pin, last sensor value, last sensor read time, pump water above, pumping (boolean), pump stop at
 int numberOfPumps = 2;
-long int sys[2][8] = {
-	{0, 32, 2, 0, 34, 3600, 0, 2500},
-	{0, 33, 2, 0, 35, 1200, 0, 2500},
+long int sys[2][10] = {
+	{0, 32, 30, 0, 34, 0, 0, 2500, 1, 0},
+	{1, 33, 30, 0, 35, 0, 0, 2500, 1, 0},
 };
 
 //code
 long int timeNewUpdate = 0;
+long int lastReboot = 0; //in mins
+boolean autoWater = true;
 
 ////////////////////////////////////////////////////////////////////////////////////////
 void setup() {
+	Serial.begin(115200);
 	// turn off all pumps
 	initPump();
 
@@ -60,49 +72,51 @@ void setup() {
 	// get time from NTP server and update local time
 	initTime();
 	
+	//initialise arduino ota handle
+	arduinoOTASetup();
+
 	//return json webreply
 	webReplyJson(); 
 
 	//return html webpage webreply
-	server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-		int params = request->params();
-		if (request->hasParam("pump")) { //evaluate return parameters
-			AsyncWebParameter* p = request->getParam("pump");
-			pumpWater(atoi(p->value().c_str()));
-		}
-		char tmp[1000];
-		webreplyHTML().toCharArray(tmp,1000);
-		request->send_P(200, "text/html", tmp); //return html page
-	});
+	webReplyHTML();
 
+	//start webserver
 	server.begin();
+	lastReboot = now();
 }
 
 void loop() {
+	//ota handle
+	ArduinoOTA.handle();
+
 	//read soil sensor
 	readSensor();
 	//pump water when needed
-	//evaluateDryness();
-	delay(5000);
+	evaluateDryness();
 }
 
 void evaluateDryness() {
-	for (int i = 0; i < numberOfPumps; ++i) {
-		if (sys[i][5] < sys[i][7]) {
-			pumpWater(i);
+	if (autoWater = true ) {
+		for (int i = 0; i < numberOfPumps; ++i) {
+			if (sys[i][0] == 0) {
+				if (sys[i][5] > sys[i][7]) {
+					pumpWater(i);
+				}
+			}
 		}
 	}
+	stopPumpWater();
 }
 
 void readSensor() {
 	for (int i = 0; i < numberOfPumps; ++i) {
-		if (now() >= sys[i][6] + sensorUpdateTime * 60 * 1000 ) {
+		//if (now() >= sys[i][6] + sensorUpdateTime * 60 * 1000 ) {
 			if (sys[i][0] == 0) {
 				sys[i][5] = analogRead(sys[i][4]); //read sensor value
 				sys[i][6] = now(); //update last read time
-				delay(50);
 			}
-		}
+		//}
 	}
 }
 
@@ -130,34 +144,61 @@ String webreplyHTML() {
 	tmp += F("<th>Last reading</th>");
 	tmp += F("<th>Pump</th>");
 	tmp += F("</tr>");
-	for (int i = 0; i < numberOfPumps; ++i) {
-		tmp += F("<tr>");
-		tmp += F("<td>");
-		tmp += i;
-		tmp += F("</td>");
-		tmp += F("<td>");
-		tmp += sys[i][2];
-		tmp += F("</td>");
-		tmp += F("<td>");
-		tmp += displayTime(sys[i][3]);
-		tmp += F("</td>");
-		tmp += F("<td>");
-		tmp += getDrynessScale(sys[i][5]);
-		tmp += F("</td>");
-		tmp += F("<td>");
-		tmp += displayTime(sys[i][6]);
-		tmp += F("</td>");
-		tmp += F("<td>");
-		tmp += "<form action = \"/\"><button type=\"submit\" name=\"pump\" value=\"";
-		tmp += i;
-		tmp += "\">ON</button></form>";
-		tmp += F("</td>");
-		tmp += F("</tr>");
+	for (int i = 0; i < numberOfPumps; ++i){
+		if (sys[i][0] == 0) {
+			tmp += F("<tr>");
+			tmp += F("<td>");
+			tmp += i;
+			tmp += F("</td>");
+			tmp += F("<td>");
+			tmp += sys[i][2];
+			tmp += F("</td>");
+			tmp += F("<td>");
+			if (sys[i][3] > 0) {
+				tmp += displayTime(sys[i][3]);
+			}
+			else {
+				tmp += "NA";
+			}
+			tmp += F("</td>");
+			tmp += F("<td>");
+			//tmp += getDrynessScale(sys[i][5]);
+			tmp += sys[i][5];
+			tmp += F("</td>");
+			tmp += F("<td>");
+			if (sys[i][6] > 0) {
+				tmp += displayTime(sys[i][6]);
+			}
+			else {
+				tmp += "NA";
+			}
+			tmp += F("</td>");
+			tmp += F("<td>");
+			tmp += "<form action = \"/\"><button type=\"submit\" name=\"pump\" value=\"";
+			tmp += i;
+			tmp += "\">ON</button></form>";
+			tmp += F("</td>");
+			tmp += F("</tr>");
+		}
 	}
 	tmp += F("</table>");
 	tmp += F("</body>");
+	tmp += F("Autowater: ");
+	tmp += convertBoolean(autoWater);
+	tmp += "<form action = \"/\"><button type=\"submit\" name=\"auto\" value=\"0\">Change</button></form>";
+	tmp += F("Last reboot: ");
+	tmp += displayTime(lastReboot);
 	tmp += F("</html>");
 	return tmp;
+}
+
+String convertBoolean(boolean b) {
+	if (b == true) {
+		return "true";
+	}
+	else {
+		return "false";
+	}
 }
 
 String getDrynessScale(int t) {
@@ -175,6 +216,23 @@ String getDrynessScale(int t) {
 	}
 }
 
+void webReplyHTML() {
+	server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+		int params = request->params();
+		if (request->hasParam("pump")) { //evaluate pump return parameters
+			AsyncWebParameter* p = request->getParam("pump");
+			pumpWater(atoi(p->value().c_str()));
+		}
+		if (request->hasParam("auto")) { //evaluate autowater return parameters
+			autoWater = !autoWater;
+		}
+		
+		char tmp[1000];
+		webreplyHTML().toCharArray(tmp, 1000);
+		request->send_P(200, "text/html", tmp); //return html page
+	});
+}
+
 void webReplyJson() {
 	server.on("/json", HTTP_GET, [](AsyncWebServerRequest *request) {
 		AsyncResponseStream *reply = request->beginResponseStream("text/json");
@@ -186,11 +244,13 @@ void webReplyJson() {
 		response["time"] = now();
 		JsonObject& sensor = root.createNestedObject("sensor");
 		for (int i = 0; i < numberOfPumps; ++i) {
-			JsonObject& sensorNumber = sensor.createNestedObject(String(i));
-			sensorNumber[F("Pumping time")] = sys[i][2];
-			sensorNumber[F("Last pump time")] = sys[i][3];
-			sensorNumber[F("Moisture lvl.")] = getDrynessScale(sys[i][5]);
-			sensorNumber[F("Last reading time")] = sys[i][6];
+			if (sys[i][0] == 0) {
+				JsonObject& sensorNumber = sensor.createNestedObject(String(i));
+				sensorNumber[F("Pumping time")] = sys[i][2];
+				sensorNumber[F("Last pump time")] = sys[i][3];
+				sensorNumber[F("Moisture lvl.")] = getDrynessScale(sys[i][5]);
+				sensorNumber[F("Last reading time")] = sys[i][6];
+			}
 		}
 		root.printTo(*reply);
 		request->send(reply);
@@ -214,12 +274,25 @@ String displayTime(time_t t) {
 }
 
 void pumpWater(int p) {
-	digitalWrite(p, HIGH);
-	delay(sys[p][2] * 1000); //pump time
-	digitalWrite(p, LOW);
-	sys[p][3] = now(); //set last pump time
-	Serial.print("pumping: ");
-	Serial.print(p);
+	digitalWrite(sys[p][1], HIGH);
+	sys[p][8] = 0;
+	sys[p][9] = now() + sys[p][2];
+	Serial.println(sys[p][9]);
+}
+
+void stopPumpWater() {
+	for (int i = 0; i < numberOfPumps; ++i) {
+		if (sys[i][0] == 0) {
+			if (sys[i][8] == 0) {
+				if (now() >= sys[i][9]) {
+					digitalWrite(sys[i][1], LOW);
+					Serial.println("off");
+					sys[i][8] = 1; //change pump status to disabled
+					sys[i][3] = now(); //set last pump time
+				}
+			}
+		}
+	}
 }
 
 void connectToWifi() {
@@ -227,7 +300,8 @@ void connectToWifi() {
 	Serial.println();
 	Serial.println();
 	Serial.print("Connecting to wifi: ");
-#endif	
+#endif
+	WiFi.mode(WIFI_STA);
 	WiFi.begin(SSID, PASSWORD);
 	WiFi.setHostname(WIFI_HOSTNAME);
 	while (WiFi.status() != WL_CONNECTED) {
@@ -319,4 +393,36 @@ String doubleDigit(int number) {
 		tmp = String(number);
 		return tmp;
 	}
+}
+
+void arduinoOTASetup() {
+	ArduinoOTA.setPort(arduinoOTAPort);
+	ArduinoOTA.setHostname(arduinoOTAHostname);
+	ArduinoOTA.setPasswordHash(arduinoOTAPasswordHash);
+	ArduinoOTA
+		.onStart([]() {
+		String type;
+		if (ArduinoOTA.getCommand() == U_FLASH)
+			type = "sketch";
+		else // U_SPIFFS
+			type = "filesystem";
+
+		// NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
+		Serial.println("Start updating " + type);
+	})
+		.onEnd([]() {
+		Serial.println("\nEnd");
+	})
+		.onProgress([](unsigned int progress, unsigned int total) {
+		Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+	})
+		.onError([](ota_error_t error) {
+		Serial.printf("Error[%u]: ", error);
+		if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+		else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+		else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+		else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+		else if (error == OTA_END_ERROR) Serial.println("End Failed");
+	});
+	ArduinoOTA.begin();
 }
