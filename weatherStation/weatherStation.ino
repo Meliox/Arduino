@@ -7,9 +7,12 @@
 #include <HardwareSerial.h> // to communicate with nextion display
 #include <Wire.h>
 #include "Adafruit_BME280.h" //Bme280_I2C_ESP32 by Takatsuki0204
+#include <ESPmDNS.h> //arduino ota
+#include <WiFiUdp.h> //arduino ota
+#include <ArduinoOTA.h> //arduino ota
 
 //enable code debugging below
-//#define DEBUG //simple debug
+#define DEBUG //simple debug
 //#define DEBUGALL //display json response from forecast api
 
 // Wifi configuration
@@ -23,17 +26,22 @@ const char* WIFI_HOSTNAME = "";
 #define SEALEVELPRESSURE_HPA (1019.9)
 #define BME280_ADD 0x76 //find using i2cscanner
 Adafruit_BME280 bme(I2C_SDA, I2C_SCL);
-const float INDOOR_TEMP_CORRECTION = 2.0;
+const float INDOOR_TEMP_CORRECTION = 10.0;
 
 //nextion configuration
 // nextion display sdcard has to be FAT32+2048 cluster
 //set baud rate for Nextion display
 //nexSerial.print("bauds=115200");
 //endNextionCommand();
-#define RX 19 //SDA pin
-#define TX 22 //SDL pin
+#define RX 22 //SDA pin
+#define TX 19 //SDL pin
 #define NEXTION_BAUDRATE 115200
 #define NEXTION_CONFIG SERIAL_8N1
+
+//Arduino OTA
+const uint16_t arduinoOTAPort = 3232;
+const char* arduinoOTAHostname = "";
+const char* arduinoOTAPasswordHash = "";
 
 // Time configuration
 const char* ntpServerName = "europe.pool.ntp.org";     //server pool
@@ -44,10 +52,7 @@ TimeChangeRule mySTD = { "DST", Fourth, Sun, Nov, 3, timeZoneOffset * 60 + 60 };
 const String URL = F("http://api.wunderground.com/api/"); //api returns localised time
 const String API_KEY = F(""); //api key
 											  //below is used for forecast and astromi data
-const String COUNTRY_ISO3166 = F(""); //country code
-const String CITY = F(""); //city
-									 //below is used for current weather (local weather station)
-const String PWS = F("");
+const String PWS = F(""); //for current weather (local weather station)
 
 const int WEATHER_CURRENT_UPDATE_TIME = 30; //time in mins
 const int WEATHER_FORECAST_UPDATE_TIME = 180; //time in mins
@@ -81,6 +86,7 @@ int TIME_SERVER_PASSES = 4;                     // number of tries to connect to
 boolean TIME_SERVER_CONNECTED = false;          // is set to true when the time is read from the server
 
 void setup() {
+	Serial.begin(115200);
 	// intialise nextion display
 	initDisplay();
 
@@ -89,6 +95,9 @@ void setup() {
 
 	// get time from NTP server and update local time
 	initTime();
+
+	//initialise arduino ota handle
+	arduinoOTASetup();
 
 	//init sensor
 	initBME280();
@@ -152,7 +161,7 @@ void initDisplay() {
 	endNextionCommand();
 
 	//lower light //todo: add sensor
-	nexSerial.print(F("dim=40"));
+	nexSerial.print(F("dim=30"));
 	endNextionCommand();
 
 	//set display to loading
@@ -236,7 +245,8 @@ void connectToWifi() {
 	Serial.println();
 	Serial.println();
 	Serial.print("Connecting to wifi: ");
-#endif	
+#endif
+	WiFi.mode(WIFI_STA);
 	WiFi.begin(SSID, PASSWORD);
 	WiFi.setHostname(WIFI_HOSTNAME);
 	while (WiFi.status() != WL_CONNECTED) {
@@ -371,7 +381,7 @@ int getAstronomi() {
 	String tmp;
 	if ((WiFi.status() == WL_CONNECTED)) {
 		HTTPClient http;
-		String url = URL + API_KEY + F("/astronomy/q/") + COUNTRY_ISO3166 + F("/") + CITY + F(".json");
+		String url = URL + API_KEY + F("/astronomy/q/pws:") + PWS + F(".json");
 #ifdef DEBUG
 		Serial.println(url);
 #endif
@@ -419,7 +429,7 @@ int getAstronomi() {
 				//last update time
 				updateTime(2);
 				sendToLCD(2, 1, F("timeAstronomi"), timeTmp);
-				return 0;
+				return 1;
 			}
 			else {
 				updateTime(2);
@@ -427,7 +437,7 @@ int getAstronomi() {
 				tmp += F("(ERROR: )");
 				tmp += "parseObject() failed";
 				sendToLCD(2, 1, F("timeAstronomi"), tmp);
-				return 1;
+				return 0;
 			}
 		}
 		else {
@@ -437,7 +447,7 @@ int getAstronomi() {
 			tmp += F("(ERROR: )");
 			tmp += httpCode;
 			sendToLCD(2, 1, F("timeAstronomi"), tmp);
-			return 1;
+			return 0;
 		}
 	}
 }
@@ -474,7 +484,6 @@ int getWeatherCurrent() {
 				//weather icon
 				String current_observation_icon = current_observation["icon"];
 				sendToLCD(1, 3, F("day0"), String(getWeatherPicture(current_observation_icon, 1)));
-				Serial.println(current_observation_icon);
 
 				//temperature
 				float current_observation_temp_c = current_observation["temp_c"];
@@ -491,7 +500,7 @@ int getWeatherCurrent() {
 				int current_observation_wind_degrees = current_observation["wind_degrees"];
 				tmp = String(round(current_observation_wind_kph * 1000 / 3600));
 				tmp += " m/s from ";
-				tmp += getShortWindDirection(current_observation_wind_degrees);
+				tmp += getShortWindDirection(current_observation_wind_degrees);			
 				sendToLCD(1, 1, F("windADir"), tmp);
 
 				//display pressure
@@ -506,20 +515,21 @@ int getWeatherCurrent() {
 				sendToLCD(1, 1, F("UVindex"), tmp);
 
 				//last update time
-				time_t current_observation_observation_epoch = current_observation["local_epoch"]; // "1526054880"
-				tmp = String(doubleDigit(hour(current_observation_observation_epoch)));
+				time_t current_observation_observation_epoch = current_observation["observation_epoch"]; // "1526054880"
+				time_t localUnixTime = myTZ.toLocal(current_observation_observation_epoch);
+				tmp = String(doubleDigit(hour(localUnixTime)));
 				tmp += ":";
-				tmp += String(doubleDigit(minute(current_observation_observation_epoch)));
+				tmp += String(doubleDigit(minute(localUnixTime)));
 				tmp += ":";
-				tmp += String(doubleDigit(second(current_observation_observation_epoch)));
+				tmp += String(doubleDigit(second(localUnixTime)));
 				tmp += " - ";
-				tmp += String(doubleDigit(day(current_observation_observation_epoch)));
+				tmp += String(doubleDigit(day(localUnixTime)));
 				tmp += "/";
-				tmp += String(doubleDigit(month(current_observation_observation_epoch)));
+				tmp += String(doubleDigit(month(localUnixTime)));
 				tmp += "/";
-				tmp += String(doubleDigit(year(current_observation_observation_epoch)));
+				tmp += String(doubleDigit(year(localUnixTime)));
 				sendToLCD(2, 1, F("timeCurrent"), tmp);
-				return 0;
+				return 1;
 			}
 			else {
 				updateTime(2);
@@ -527,7 +537,7 @@ int getWeatherCurrent() {
 				tmp += F("(ERROR: )");
 				tmp += "parseObject() failed";
 				sendToLCD(2, 1, F("timeCurrent"), tmp);
-				return 1;
+				return 0;
 			}
 		}
 		else {
@@ -537,7 +547,7 @@ int getWeatherCurrent() {
 			tmp += F("(ERROR: )");
 			tmp += httpCode;
 			sendToLCD(2, 1, F("timeCurrent"), tmp);
-			return 1;
+			return 0;
 		}
 	}
 }
@@ -547,7 +557,7 @@ int getWeatherForecast() {
 	String tmp;
 	if ((WiFi.status() == WL_CONNECTED)) {
 		HTTPClient http;
-		String url = URL + API_KEY + F("/forecast/q/") + COUNTRY_ISO3166 + F("/") + CITY + F(".json");
+		String url = URL + API_KEY + F("/forecast/q/pws:") + PWS + F(".json");
 #ifdef DEBUG
 		Serial.println(url);
 #endif
@@ -597,7 +607,6 @@ int getWeatherForecast() {
 				int forecast_simpleforecast_forecastday1_low_celsius = forecast_simpleforecast_forecastday1["low"]["celsius"]; // "9"
 				sendToLCD(1, 1, F("day1low"), String(forecast_simpleforecast_forecastday1_low_celsius));
 				String forecast_simpleforecast_forecastday1_icon = forecast_simpleforecast_forecastday1["icon"]; // "clear"
-				Serial.println(forecast_simpleforecast_forecastday1_icon);
 				sendToLCD(1, 3, F("day1"), String(getWeatherPicture(forecast_simpleforecast_forecastday1_icon, 2)));
 
 				//day+2
@@ -611,7 +620,6 @@ int getWeatherForecast() {
 				sendToLCD(1, 1, F("day2low"), String(forecast_simpleforecast_forecastday2_low_celsius));
 				String forecast_simpleforecast_forecastday2_icon = forecast_simpleforecast_forecastday2["icon"]; // "clear"
 				sendToLCD(1, 3, F("day2"), String(getWeatherPicture(forecast_simpleforecast_forecastday2_icon, 2)));
-				Serial.println(forecast_simpleforecast_forecastday2_icon);
 
 				//day+3
 				JsonObject& forecast_simpleforecast_forecastday3 = forecast_simpleforecast_forecastday[3];
@@ -624,12 +632,11 @@ int getWeatherForecast() {
 				sendToLCD(1, 1, F("day3low"), String(forecast_simpleforecast_forecastday3_low_celsius));
 				String forecast_simpleforecast_forecastday3_icon = forecast_simpleforecast_forecastday3["icon"]; // "clear"
 				sendToLCD(1, 3, F("day3"), String(getWeatherPicture(forecast_simpleforecast_forecastday3_icon, 2)));
-				Serial.println(forecast_simpleforecast_forecastday3_icon);
 
 				//last update time
 				updateTime(2);
 				sendToLCD(2, 1, F("timeForecast"), timeTmp);
-				return 0;
+				return 1;
 			}
 			else {
 				updateTime(2);
@@ -637,7 +644,7 @@ int getWeatherForecast() {
 				tmp += F("(ERROR: )");
 				tmp += "parseObject() failed";
 				sendToLCD(2, 1, F("timeForecast"), tmp);
-				return 1;
+				return 0;
 			}
 		}
 		else {
@@ -647,7 +654,7 @@ int getWeatherForecast() {
 			tmp += F("(ERROR: )");
 			tmp += httpCode;
 			sendToLCD(2, 1, F("timeForecast"), tmp);
-			return 1;
+			return 0;
 		}
 	}
 }
@@ -665,24 +672,30 @@ time_t tmConvert_t(int YYYY, byte MM, byte DD, byte hh, byte mm, byte ss)
 }
 
 String getShortWindDirection(int degrees) {
-	int sector = ((degrees + 11) / 22.5 - 1);
-	switch (sector) {
-	case 0: return F("N");
-	case 1: return F("NNE");
-	case 2: return F("NE");
-	case 3: return F("ENE");
-	case 4: return F("E");
-	case 5: return F("ESE");
-	case 6: return F("SE");
-	case 7: return F("SSE");
-	case 8: return F("S");
-	case 9: return F("SSW");
-	case 10: return F("SW");
-	case 11: return F("WSW");
-	case 12: return F("W");
-	case 13: return F("WNW");
-	case 14: return F("NW");
-	case 15: return F("NNW");
+	// ensure proper degree
+	if (degrees < 0 || degrees > 360) {
+		return F("NA");
+	}
+	else {
+		int sector = ((degrees + 11) / 22.5 - 1);
+		switch (sector) {
+		case 0: return F("N");
+		case 1: return F("NNE");
+		case 2: return F("NE");
+		case 3: return F("ENE");
+		case 4: return F("E");
+		case 5: return F("ESE");
+		case 6: return F("SE");
+		case 7: return F("SSE");
+		case 8: return F("S");
+		case 9: return F("SSW");
+		case 10: return F("SW");
+		case 11: return F("WSW");
+		case 12: return F("W");
+		case 13: return F("WNW");
+		case 14: return F("NW");
+		case 15: return F("NNW");
+		}
 	}
 }
 
@@ -975,4 +988,36 @@ void sendToLCD(uint8_t page, uint8_t type, String index, String cmd) {
 	Serial.print("To display: ");
 	Serial.println(tmp);
 #endif
+}
+
+void arduinoOTASetup() {
+	ArduinoOTA.setPort(arduinoOTAPort);
+	ArduinoOTA.setHostname(arduinoOTAHostname);
+	ArduinoOTA.setPasswordHash(arduinoOTAPasswordHash);
+	ArduinoOTA
+		.onStart([]() {
+		String type;
+		if (ArduinoOTA.getCommand() == U_FLASH)
+			type = "sketch";
+		else // U_SPIFFS
+			type = "filesystem";
+
+		// NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
+		Serial.println("Start updating " + type);
+	})
+		.onEnd([]() {
+		Serial.println("\nEnd");
+	})
+		.onProgress([](unsigned int progress, unsigned int total) {
+		Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+	})
+		.onError([](ota_error_t error) {
+		Serial.printf("Error[%u]: ", error);
+		if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+		else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+		else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+		else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+		else if (error == OTA_END_ERROR) Serial.println("End Failed");
+	});
+	ArduinoOTA.begin();
 }
